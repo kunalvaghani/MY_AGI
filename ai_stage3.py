@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 """
-Stage 2 local AI assistant.
+Stage 3 local AI assistant.
 
-This file extends the Stage 1 command-line chat assistant with a bounded,
-inspectable Transfer Learning mode. The implementation is intentionally simple:
-there is no persistent learning, no fine-tuning, no vector memory, and no
-hidden state outside the explicit case / log files used for this stage.
+This file preserves the Stage 1 chat loop and the Stage 2 transfer-learning
+benchmark, then adds a bounded, inspectable Stage 3 rapid-adaptation mode.
 
-Stage 2 scope only:
-- Preserve Stage 1 chat behavior in chat mode.
-- Add transfer-demo mode for side-by-side baseline vs transfer-assisted runs.
-- Add transfer-eval mode for a reproducible benchmark, scorecard, and failure log.
+Important honesty boundary:
+- This is not model training.
+- This is not persistent learning across runs.
+- This is not Stage 4 few-shot / zero-shot competence.
+- This is a small application-level adaptation loop that measures whether the
+  model improves within the same run after a small correction or one/few
+  corrective examples.
 """
 
 import argparse
@@ -35,19 +36,39 @@ else:
     OLLAMA_IMPORT_ERROR = None
 
 
-APP_NAME = "Local AI Assistant - Stage 2"
+APP_NAME = "Local AI Assistant - Stage 3"
 DEFAULT_MODEL = "gemma3:latest"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TEMPERATURE = 0.2
 DEFAULT_MODE = "chat"
-DEFAULT_CASES_PATH = "stage2_transfer_cases.json"
-DEFAULT_SCORECARD_PATH = "stage2_scorecard.json"
-DEFAULT_FAILURE_LOG_PATH = "failure_log_stage2.md"
+DEFAULT_STAGE2_CASES_PATH = "stage2_transfer_cases.json"
+DEFAULT_STAGE3_CASES_PATH = "stage3_adaptation_cases.json"
+DEFAULT_STAGE2_SCORECARD_PATH = "stage2_scorecard.json"
+DEFAULT_STAGE2_FAILURE_LOG_PATH = "failure_log_stage2.md"
+DEFAULT_STAGE3_SCORECARD_PATH = "stage3_scorecard.json"
+DEFAULT_STAGE3_FAILURE_LOG_PATH = "failure_log_stage3.md"
 
 HELP_TEXT = """Available commands:
   /help   Show this help message
   /reset  Clear the current in-memory conversation
   /exit   Quit the application"""
+
+SUPPORTED_MODES = [
+    "chat",
+    "transfer-demo",
+    "transfer-eval",
+    "adapt-demo",
+    "adapt-eval",
+]
+
+ALLOWED_ADAPTATION_TYPES = {
+    "explicit correction",
+    "rule update",
+    "one corrected example",
+    "two corrected examples",
+    "output format correction",
+    "constraint correction",
+}
 
 
 @dataclass(frozen=True)
@@ -56,7 +77,9 @@ class AppConfig:
 
     model: str
     mode: str = DEFAULT_MODE
-    cases_path: str = DEFAULT_CASES_PATH
+    cases_path: str = DEFAULT_STAGE2_CASES_PATH
+    scorecard_out: str = DEFAULT_STAGE2_SCORECARD_PATH
+    failure_log_out: str = DEFAULT_STAGE2_FAILURE_LOG_PATH
     limit: int | None = None
     ollama_host: str = DEFAULT_OLLAMA_HOST
     temperature: float = DEFAULT_TEMPERATURE
@@ -69,16 +92,16 @@ class ConfigResolver:
     def build_parser() -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
             description=(
-                "Run the Stage 2 local AI assistant against a local Ollama model. "
-                "Modes: chat, transfer-demo, transfer-eval."
+                "Run the Stage 3 local AI assistant against a local Ollama model. "
+                "Modes: chat, transfer-demo, transfer-eval, adapt-demo, adapt-eval."
             )
         )
         parser.add_argument(
             "--mode",
             dest="mode",
-            choices=["chat", "transfer-demo", "transfer-eval"],
+            choices=SUPPORTED_MODES,
             default=DEFAULT_MODE,
-            help="Run normal chat or a Stage 2 transfer benchmark mode.",
+            help="Run normal chat, a Stage 2 transfer mode, or a Stage 3 adaptation mode.",
         )
         parser.add_argument(
             "--model",
@@ -88,14 +111,23 @@ class ConfigResolver:
         parser.add_argument(
             "--cases",
             dest="cases_path",
-            default=DEFAULT_CASES_PATH,
-            help="Path to the Stage 2 transfer cases JSON file.",
+            help="Path to the transfer or adaptation cases JSON file.",
         )
         parser.add_argument(
             "--limit",
             dest="limit",
             type=int,
-            help="Limit the number of transfer cases to run.",
+            help="Limit the number of benchmark cases to run.",
+        )
+        parser.add_argument(
+            "--scorecard-out",
+            dest="scorecard_out",
+            help="Path to write the scorecard JSON file.",
+        )
+        parser.add_argument(
+            "--failure-log-out",
+            dest="failure_log_out",
+            help="Path to write the markdown failure log.",
         )
         return parser
 
@@ -123,12 +155,36 @@ class ConfigResolver:
         if args.limit is not None and args.limit <= 0:
             parser.error("--limit must be a positive integer when provided.")
 
+        default_cases_path = cls._resolve_default_cases_path(args.mode)
+        default_scorecard_out = cls._resolve_default_scorecard_out(args.mode)
+        default_failure_log_out = cls._resolve_default_failure_log_out(args.mode)
+
         return AppConfig(
             model=selected_model,
             mode=args.mode,
-            cases_path=args.cases_path,
+            cases_path=(args.cases_path or default_cases_path),
+            scorecard_out=(args.scorecard_out or default_scorecard_out),
+            failure_log_out=(args.failure_log_out or default_failure_log_out),
             limit=args.limit,
         )
+
+    @staticmethod
+    def _resolve_default_cases_path(mode: str) -> str:
+        if mode in {"adapt-demo", "adapt-eval"}:
+            return DEFAULT_STAGE3_CASES_PATH
+        return DEFAULT_STAGE2_CASES_PATH
+
+    @staticmethod
+    def _resolve_default_scorecard_out(mode: str) -> str:
+        if mode in {"adapt-demo", "adapt-eval"}:
+            return DEFAULT_STAGE3_SCORECARD_PATH
+        return DEFAULT_STAGE2_SCORECARD_PATH
+
+    @staticmethod
+    def _resolve_default_failure_log_out(mode: str) -> str:
+        if mode in {"adapt-demo", "adapt-eval"}:
+            return DEFAULT_STAGE3_FAILURE_LOG_PATH
+        return DEFAULT_STAGE2_FAILURE_LOG_PATH
 
 
 class OllamaServiceError(Exception):
@@ -393,15 +449,7 @@ class TransferCaseLoader:
         if not case_path.exists():
             raise Stage2CaseLoadError(f"Transfer case file was not found: {case_path}")
 
-        try:
-            raw_text = case_path.read_text(encoding="utf-8")
-        except OSError as exc:
-            raise Stage2CaseLoadError(f"Could not read transfer case file: {exc}") from exc
-
-        try:
-            payload = json.loads(raw_text)
-        except json.JSONDecodeError as exc:
-            raise Stage2CaseLoadError(f"Transfer case file is not valid JSON: {exc}") from exc
+        payload = self._read_json(case_path)
 
         if isinstance(payload, dict) and "cases" in payload:
             payload = payload["cases"]
@@ -429,6 +477,17 @@ class TransferCaseLoader:
         if limit is not None:
             return cases[:limit]
         return cases
+
+    def _read_json(self, case_path: Path) -> Any:
+        try:
+            raw_text = case_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise Stage2CaseLoadError(f"Could not read transfer case file: {exc}") from exc
+
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise Stage2CaseLoadError(f"Transfer case file is not valid JSON: {exc}") from exc
 
 
 class TransferPromptBuilder:
@@ -484,6 +543,48 @@ class TransferCaseResult:
     probable_failure_reason: str | None = None
 
 
+class ScoringEngine:
+    """Deterministic scoring helpers shared across Stage 2 and Stage 3."""
+
+    def score_answer(
+        self,
+        answer: str,
+        expected_answer: str,
+        scoring_type: str,
+    ) -> tuple[bool, str | None]:
+        scoring_key = self._normalize_scoring_type(scoring_type)
+        try:
+            if scoring_key == "exact":
+                return answer.strip() == expected_answer.strip(), None
+
+            if scoring_key == "case-insensitive exact":
+                return answer.strip().casefold() == expected_answer.strip().casefold(), None
+
+            if scoring_key == "contains":
+                return expected_answer.strip().casefold() in answer.strip().casefold(), None
+
+            if scoring_key == "regex":
+                return re.search(expected_answer, answer, flags=re.DOTALL) is not None, None
+
+            if scoring_key == "custom normalized exact":
+                return self.normalize_whitespace(answer) == self.normalize_whitespace(expected_answer), None
+
+            return False, f"Unknown scoring_type '{scoring_type}'."
+        except re.error as exc:
+            return False, f"Invalid regex scoring pattern: {exc}"
+        except Exception as exc:  # pragma: no cover - defensive guard
+            return False, f"Scoring failed unexpectedly: {exc}"
+
+    def normalize_whitespace(self, value: str) -> str:
+        return " ".join(value.split())
+
+    def _normalize_scoring_type(self, scoring_type: str) -> str:
+        key = " ".join(scoring_type.strip().lower().replace("_", " ").split())
+        if key == "normalized exact":
+            return "custom normalized exact"
+        return key
+
+
 class TransferEvaluator:
     """Run baseline vs transfer-assisted evaluation for Stage 2."""
 
@@ -493,22 +594,24 @@ class TransferEvaluator:
         model: str,
         temperature: float,
         prompt_builder: TransferPromptBuilder | None = None,
+        scoring_engine: ScoringEngine | None = None,
     ) -> None:
         self.ollama_client = ollama_client
         self.model = model
         self.temperature = temperature
         self.prompt_builder = prompt_builder if prompt_builder is not None else TransferPromptBuilder()
+        self.scoring_engine = scoring_engine if scoring_engine is not None else ScoringEngine()
 
     def evaluate_case(self, case: Stage2TransferCase) -> TransferCaseResult:
         baseline_answer = self._run_single_prompt(self.prompt_builder.build_baseline_prompt(case))
         transfer_answer = self._run_single_prompt(self.prompt_builder.build_transfer_prompt(case))
 
-        baseline_pass, baseline_scoring_error = self.score_answer(
+        baseline_pass, baseline_scoring_error = self.scoring_engine.score_answer(
             answer=baseline_answer,
             expected_answer=case.expected_answer,
             scoring_type=case.scoring_type,
         )
-        transfer_pass, transfer_scoring_error = self.score_answer(
+        transfer_pass, transfer_scoring_error = self.scoring_engine.score_answer(
             answer=transfer_answer,
             expected_answer=case.expected_answer,
             scoring_type=case.scoring_type,
@@ -546,35 +649,6 @@ class TransferEvaluator:
     def evaluate_cases(self, cases: Sequence[Stage2TransferCase]) -> list[TransferCaseResult]:
         return [self.evaluate_case(case) for case in cases]
 
-    def score_answer(
-        self,
-        answer: str,
-        expected_answer: str,
-        scoring_type: str,
-    ) -> tuple[bool, str | None]:
-        scoring_key = scoring_type.strip().lower()
-        try:
-            if scoring_key == "exact":
-                return answer.strip() == expected_answer.strip(), None
-
-            if scoring_key == "case-insensitive exact":
-                return answer.strip().casefold() == expected_answer.strip().casefold(), None
-
-            if scoring_key == "contains":
-                return expected_answer.strip().casefold() in answer.strip().casefold(), None
-
-            if scoring_key == "regex":
-                return re.search(expected_answer, answer, flags=re.DOTALL) is not None, None
-
-            if scoring_key == "normalized_exact":
-                return self._normalize_whitespace(answer) == self._normalize_whitespace(expected_answer), None
-
-            return False, f"Unknown scoring_type '{scoring_type}'."
-        except re.error as exc:
-            return False, f"Invalid regex scoring pattern: {exc}"
-        except Exception as exc:  # pragma: no cover - defensive guard
-            return False, f"Scoring failed unexpectedly: {exc}"
-
     def build_scorecard(self, results: Sequence[TransferCaseResult]) -> dict[str, Any]:
         total_cases = len(results)
         baseline_pass_count = sum(result.baseline_pass for result in results)
@@ -607,9 +681,6 @@ class TransferEvaluator:
         except OllamaServiceError as exc:
             return f"ERROR: {exc}"
 
-    def _normalize_whitespace(self, value: str) -> str:
-        return " ".join(value.split())
-
     def _infer_failure_reason(
         self,
         baseline_answer: str,
@@ -633,11 +704,311 @@ class TransferEvaluator:
             return "Transfer prompt likely distracted the model or overfit the source example."
 
         if (not baseline_pass) and (not transfer_pass):
-            baseline_norm = self._normalize_whitespace(baseline_answer).casefold()
-            transfer_norm = self._normalize_whitespace(transfer_answer).casefold()
+            baseline_norm = self.scoring_engine.normalize_whitespace(baseline_answer).casefold()
+            transfer_norm = self.scoring_engine.normalize_whitespace(transfer_answer).casefold()
             if baseline_norm == transfer_norm:
                 return "Transfer prompt did not materially change the answer."
             return "Abstract rule was not applied correctly to the target task."
+
+        return None
+
+
+class Stage3CaseLoadError(Exception):
+    """Raised when the adaptation case file cannot be loaded safely."""
+
+
+@dataclass(frozen=True)
+class Stage3AdaptationCase:
+    """One curated Stage 3 rapid-adaptation case."""
+
+    case_id: str
+    domain: str
+    adaptation_type: str
+    initial_task: str
+    expected_initial_answer: str
+    feedback_type: str
+    feedback_payload: str
+    followup_task: str
+    expected_followup_answer: str
+    scoring_type: str
+    notes: str
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "Stage3AdaptationCase":
+        required_fields = [
+            "case_id",
+            "domain",
+            "adaptation_type",
+            "initial_task",
+            "expected_initial_answer",
+            "feedback_type",
+            "feedback_payload",
+            "followup_task",
+            "expected_followup_answer",
+            "scoring_type",
+            "notes",
+        ]
+        missing = [field_name for field_name in required_fields if field_name not in mapping]
+        if missing:
+            raise Stage3CaseLoadError(
+                "Adaptation case is missing required field(s): " + ", ".join(missing)
+            )
+
+        values: dict[str, str] = {}
+        for field_name in required_fields:
+            value = mapping[field_name]
+            if not isinstance(value, str) or not value.strip():
+                raise Stage3CaseLoadError(
+                    f"Adaptation case field '{field_name}' must be a non-empty string."
+                )
+            values[field_name] = value.strip()
+
+        adaptation_type = values["adaptation_type"].lower()
+        if adaptation_type not in ALLOWED_ADAPTATION_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_ADAPTATION_TYPES))
+            raise Stage3CaseLoadError(
+                f"Unsupported adaptation_type '{values['adaptation_type']}'. Allowed values: {allowed}."
+            )
+
+        return cls(**values)
+
+
+class AdaptationCaseLoader:
+    """Load and validate the Stage 3 adaptation benchmark cases."""
+
+    def load(self, path: str, limit: int | None = None) -> list[Stage3AdaptationCase]:
+        case_path = Path(path)
+        if not case_path.exists():
+            raise Stage3CaseLoadError(f"Adaptation case file was not found: {case_path}")
+
+        payload = self._read_json(case_path)
+
+        if isinstance(payload, dict) and "cases" in payload:
+            payload = payload["cases"]
+
+        if not isinstance(payload, list):
+            raise Stage3CaseLoadError(
+                "Adaptation case file must contain a JSON list of case objects "
+                "or an object with a 'cases' list."
+            )
+
+        cases: list[Stage3AdaptationCase] = []
+        seen_case_ids: set[str] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise Stage3CaseLoadError(
+                    "Each adaptation case must be a JSON object with the required fields."
+                )
+
+            case = Stage3AdaptationCase.from_mapping(item)
+            if case.case_id in seen_case_ids:
+                raise Stage3CaseLoadError(f"Duplicate case_id found: {case.case_id}")
+            seen_case_ids.add(case.case_id)
+            cases.append(case)
+
+        if limit is not None:
+            return cases[:limit]
+        return cases
+
+    def _read_json(self, case_path: Path) -> Any:
+        try:
+            raw_text = case_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise Stage3CaseLoadError(f"Could not read adaptation case file: {exc}") from exc
+
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise Stage3CaseLoadError(f"Adaptation case file is not valid JSON: {exc}") from exc
+
+
+class AdaptationPromptBuilder:
+    """Build explicit, inspectable prompts for Stage 3 rapid adaptation."""
+
+    def build_initial_prompt(self, case: Stage3AdaptationCase) -> str:
+        return (
+            "You are being evaluated on a bounded Stage 3 rapid-adaptation benchmark.\n"
+            "This is the initial attempt, before any correction is provided.\n"
+            "Solve the task as best you can.\n"
+            "Return only the final answer. Do not explain your reasoning.\n\n"
+            f"Domain: {case.domain}\n"
+            f"Adaptation type: {case.adaptation_type}\n"
+            "Initial task:\n"
+            f"{case.initial_task}"
+        )
+
+    def build_adapted_prompt(self, case: Stage3AdaptationCase, initial_answer: str) -> str:
+        return (
+            "You are being evaluated on a bounded Stage 3 rapid-adaptation benchmark.\n"
+            "This is the adapted attempt after explicit feedback or corrected examples.\n"
+            "Apply the correction or updated rule to the follow-up task.\n"
+            "Return only the final answer. Do not explain your reasoning.\n\n"
+            f"Domain: {case.domain}\n"
+            f"Adaptation type: {case.adaptation_type}\n"
+            f"Feedback type: {case.feedback_type}\n\n"
+            "Initial task:\n"
+            f"{case.initial_task}\n\n"
+            "Model's first answer:\n"
+            f"{initial_answer}\n\n"
+            "Feedback received:\n"
+            f"{case.feedback_payload}\n\n"
+            "Follow-up task:\n"
+            f"{case.followup_task}\n\n"
+            "Apply the feedback exactly when answering the follow-up task."
+        )
+
+
+@dataclass
+class AdaptationCaseResult:
+    """Structured result for one Stage 3 adaptation case."""
+
+    case_id: str
+    domain: str
+    adaptation_type: str
+    feedback_type: str
+    feedback_payload: str
+    scoring_type: str
+    initial_answer: str
+    adapted_answer: str
+    expected_initial_answer: str
+    expected_followup_answer: str
+    initial_pass: bool
+    adapted_pass: bool
+    adaptation_helped: bool
+    regression: bool
+    scoring_error_initial: str | None = None
+    scoring_error_adapted: str | None = None
+    probable_failure_reason: str | None = None
+
+
+class AdaptationEvaluator:
+    """Run inspectable before/after adaptation evaluation for Stage 3."""
+
+    def __init__(
+        self,
+        ollama_client: OllamaChatClient,
+        model: str,
+        temperature: float,
+        prompt_builder: AdaptationPromptBuilder | None = None,
+        scoring_engine: ScoringEngine | None = None,
+    ) -> None:
+        self.ollama_client = ollama_client
+        self.model = model
+        self.temperature = temperature
+        self.prompt_builder = prompt_builder if prompt_builder is not None else AdaptationPromptBuilder()
+        self.scoring_engine = scoring_engine if scoring_engine is not None else ScoringEngine()
+
+    def evaluate_case(self, case: Stage3AdaptationCase) -> AdaptationCaseResult:
+        initial_answer = self._run_single_prompt(self.prompt_builder.build_initial_prompt(case))
+        adapted_answer = self._run_single_prompt(
+            self.prompt_builder.build_adapted_prompt(case=case, initial_answer=initial_answer)
+        )
+
+        initial_pass, initial_scoring_error = self.scoring_engine.score_answer(
+            answer=initial_answer,
+            expected_answer=case.expected_initial_answer,
+            scoring_type=case.scoring_type,
+        )
+        adapted_pass, adapted_scoring_error = self.scoring_engine.score_answer(
+            answer=adapted_answer,
+            expected_answer=case.expected_followup_answer,
+            scoring_type=case.scoring_type,
+        )
+
+        adaptation_helped = (not initial_pass) and adapted_pass
+        regression = initial_pass and (not adapted_pass)
+        probable_failure_reason = self._infer_failure_reason(
+            initial_answer=initial_answer,
+            adapted_answer=adapted_answer,
+            initial_pass=initial_pass,
+            adapted_pass=adapted_pass,
+            initial_scoring_error=initial_scoring_error,
+            adapted_scoring_error=adapted_scoring_error,
+        )
+
+        return AdaptationCaseResult(
+            case_id=case.case_id,
+            domain=case.domain,
+            adaptation_type=case.adaptation_type,
+            feedback_type=case.feedback_type,
+            feedback_payload=case.feedback_payload,
+            scoring_type=case.scoring_type,
+            initial_answer=initial_answer,
+            adapted_answer=adapted_answer,
+            expected_initial_answer=case.expected_initial_answer,
+            expected_followup_answer=case.expected_followup_answer,
+            initial_pass=initial_pass,
+            adapted_pass=adapted_pass,
+            adaptation_helped=adaptation_helped,
+            regression=regression,
+            scoring_error_initial=initial_scoring_error,
+            scoring_error_adapted=adapted_scoring_error,
+            probable_failure_reason=probable_failure_reason,
+        )
+
+    def evaluate_cases(self, cases: Sequence[Stage3AdaptationCase]) -> list[AdaptationCaseResult]:
+        return [self.evaluate_case(case) for case in cases]
+
+    def build_scorecard(self, results: Sequence[AdaptationCaseResult]) -> dict[str, Any]:
+        total_cases = len(results)
+        initial_pass_count = sum(result.initial_pass for result in results)
+        adapted_pass_count = sum(result.adapted_pass for result in results)
+        adaptation_success_count = sum(result.adaptation_helped for result in results)
+        regression_count = sum(result.regression for result in results)
+
+        initial_pass_rate = (initial_pass_count / total_cases) if total_cases else 0.0
+        adapted_pass_rate = (adapted_pass_count / total_cases) if total_cases else 0.0
+
+        return {
+            "total_cases": total_cases,
+            "initial_pass_count": initial_pass_count,
+            "adapted_pass_count": adapted_pass_count,
+            "adaptation_success_count": adaptation_success_count,
+            "regression_count": regression_count,
+            "initial_pass_rate": round(initial_pass_rate, 4),
+            "pass_rate": round(adapted_pass_rate, 4),
+            "adapted_pass_rate": round(adapted_pass_rate, 4),
+            "per_case_details": [asdict(result) for result in results],
+        }
+
+    def _run_single_prompt(self, prompt: str) -> str:
+        try:
+            return self.ollama_client.send_chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+        except OllamaServiceError as exc:
+            return f"ERROR: {exc}"
+
+    def _infer_failure_reason(
+        self,
+        initial_answer: str,
+        adapted_answer: str,
+        initial_pass: bool,
+        adapted_pass: bool,
+        initial_scoring_error: str | None,
+        adapted_scoring_error: str | None,
+    ) -> str | None:
+        if initial_pass and adapted_pass:
+            return None
+
+        if initial_scoring_error or adapted_scoring_error:
+            problems = [item for item in [initial_scoring_error, adapted_scoring_error] if item]
+            return " ; ".join(problems)
+
+        if initial_answer.startswith("ERROR:") or adapted_answer.startswith("ERROR:"):
+            return "A model call failed during evaluation."
+
+        if initial_pass and not adapted_pass:
+            return "The correction step appears to have destabilized a previously correct behavior."
+
+        if (not initial_pass) and (not adapted_pass):
+            initial_norm = self.scoring_engine.normalize_whitespace(initial_answer).casefold()
+            adapted_norm = self.scoring_engine.normalize_whitespace(adapted_answer).casefold()
+            if initial_norm == adapted_norm:
+                return "Feedback did not materially change the answer."
+            return "The follow-up answer changed, but the correction was still not applied correctly."
 
         return None
 
@@ -652,9 +1023,9 @@ class ScorecardWriter:
 
 
 class FailureLogWriter:
-    """Write a human-readable markdown failure log."""
+    """Write human-readable markdown failure logs."""
 
-    def write(self, path: str | Path, results: Sequence[TransferCaseResult]) -> Path:
+    def write_transfer_log(self, path: str | Path, results: Sequence[TransferCaseResult]) -> Path:
         output_path = Path(path)
         failed_results = [result for result in results if not result.transfer_assisted_pass]
 
@@ -690,31 +1061,87 @@ class FailureLogWriter:
         output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
         return output_path
 
+    def write_adaptation_log(self, path: str | Path, results: Sequence[AdaptationCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.adapted_pass]
 
-class Stage2CLIApp:
-    """Top-level application controller for chat and transfer modes."""
+        lines: list[str] = [
+            "# Stage 3 Failure Log",
+            "",
+            f"Total failed adapted cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All adapted follow-up cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Expected initial answer: `{result.expected_initial_answer}`",
+                        f"- Initial answer: `{result.initial_answer}`",
+                        f"- Feedback received: `{result.feedback_payload}`",
+                        f"- Expected follow-up answer: `{result.expected_followup_answer}`",
+                        f"- Adapted answer: `{result.adapted_answer}`",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+
+class Stage3CLIApp:
+    """Top-level controller preserving Stage 1/2 and adding Stage 3 modes."""
 
     def __init__(
         self,
         config: AppConfig,
         ollama_client: OllamaChatClient,
-        case_loader: TransferCaseLoader | None = None,
+        transfer_case_loader: TransferCaseLoader | None = None,
+        adaptation_case_loader: AdaptationCaseLoader | None = None,
         scorecard_writer: ScorecardWriter | None = None,
         failure_log_writer: FailureLogWriter | None = None,
     ) -> None:
         self.config = config
         self.ollama_client = ollama_client
-        self.case_loader = case_loader if case_loader is not None else TransferCaseLoader()
+        self.transfer_case_loader = (
+            transfer_case_loader if transfer_case_loader is not None else TransferCaseLoader()
+        )
+        self.adaptation_case_loader = (
+            adaptation_case_loader if adaptation_case_loader is not None else AdaptationCaseLoader()
+        )
         self.scorecard_writer = scorecard_writer if scorecard_writer is not None else ScorecardWriter()
-        self.failure_log_writer = failure_log_writer if failure_log_writer is not None else FailureLogWriter()
+        self.failure_log_writer = (
+            failure_log_writer if failure_log_writer is not None else FailureLogWriter()
+        )
 
     def run(self) -> int:
         if self.config.mode == "chat":
             chat_app = Stage1CLIApp(config=self.config, ollama_client=self.ollama_client)
             return chat_app.run_repl()
 
+        if self.config.mode in {"transfer-demo", "transfer-eval"}:
+            return self._run_transfer_modes()
+
+        if self.config.mode in {"adapt-demo", "adapt-eval"}:
+            return self._run_adaptation_modes()
+
+        print(f"Error: Unsupported mode '{self.config.mode}'.")
+        return 1
+
+    def _run_transfer_modes(self) -> int:
         try:
-            cases = self.case_loader.load(self.config.cases_path, limit=self.config.limit)
+            cases = self.transfer_case_loader.load(self.config.cases_path, limit=self.config.limit)
         except Stage2CaseLoadError as exc:
             print(f"Error: {exc}")
             return 1
@@ -732,11 +1159,29 @@ class Stage2CLIApp:
         if self.config.mode == "transfer-demo":
             return self._run_transfer_demo(evaluator=evaluator, cases=cases)
 
-        if self.config.mode == "transfer-eval":
-            return self._run_transfer_eval(evaluator=evaluator, cases=cases)
+        return self._run_transfer_eval(evaluator=evaluator, cases=cases)
 
-        print(f"Error: Unsupported mode '{self.config.mode}'.")
-        return 1
+    def _run_adaptation_modes(self) -> int:
+        try:
+            cases = self.adaptation_case_loader.load(self.config.cases_path, limit=self.config.limit)
+        except Stage3CaseLoadError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        if not cases:
+            print("Error: The adaptation case file loaded successfully but contained no cases.")
+            return 1
+
+        evaluator = AdaptationEvaluator(
+            ollama_client=self.ollama_client,
+            model=self.config.model,
+            temperature=self.config.temperature,
+        )
+
+        if self.config.mode == "adapt-demo":
+            return self._run_adapt_demo(evaluator=evaluator, cases=cases)
+
+        return self._run_adapt_eval(evaluator=evaluator, cases=cases)
 
     def _run_transfer_demo(
         self,
@@ -766,8 +1211,8 @@ class Stage2CLIApp:
         results = evaluator.evaluate_cases(cases)
         scorecard = evaluator.build_scorecard(results)
 
-        scorecard_path = self.scorecard_writer.write(DEFAULT_SCORECARD_PATH, scorecard)
-        failure_log_path = self.failure_log_writer.write(DEFAULT_FAILURE_LOG_PATH, results)
+        scorecard_path = self.scorecard_writer.write(self.config.scorecard_out, scorecard)
+        failure_log_path = self.failure_log_writer.write_transfer_log(self.config.failure_log_out, results)
 
         print("Transfer evaluation complete.")
         print(f"Total cases: {scorecard['total_cases']}")
@@ -777,6 +1222,59 @@ class Stage2CLIApp:
         print(f"Regressions: {scorecard['regression_count']}")
         print(f"Baseline pass rate: {scorecard['baseline_pass_rate']:.2%}")
         print(f"Transfer-assisted pass rate: {scorecard['transfer_assisted_pass_rate']:.2%}")
+        print(f"Scorecard written to: {scorecard_path}")
+        print(f"Failure log written to: {failure_log_path}")
+
+        return 0
+
+    def _run_adapt_demo(
+        self,
+        evaluator: AdaptationEvaluator,
+        cases: Sequence[Stage3AdaptationCase],
+    ) -> int:
+        print(f"Loaded adaptation cases: {len(cases)}")
+
+        for index, case in enumerate(cases, start=1):
+            result = evaluator.evaluate_case(case)
+            print("-" * 72)
+            print(f"Demo case {index}: {case.case_id}")
+            print(f"Domain: {case.domain}")
+            print(f"Adaptation type: {case.adaptation_type}")
+            print("Initial task / rule set:")
+            print(case.initial_task)
+            print(f"Initial answer: {result.initial_answer}")
+            print("Feedback or correction received:")
+            print(case.feedback_payload)
+            print("Follow-up task:")
+            print(case.followup_task)
+            print(f"Adapted answer: {result.adapted_answer}")
+            print(f"Expected answer: {case.expected_followup_answer}")
+            print(f"Adaptation helped: {'YES' if result.adaptation_helped else 'NO'}")
+
+        return 0
+
+    def _run_adapt_eval(
+        self,
+        evaluator: AdaptationEvaluator,
+        cases: Sequence[Stage3AdaptationCase],
+    ) -> int:
+        results = evaluator.evaluate_cases(cases)
+        scorecard = evaluator.build_scorecard(results)
+
+        scorecard_path = self.scorecard_writer.write(self.config.scorecard_out, scorecard)
+        failure_log_path = self.failure_log_writer.write_adaptation_log(
+            self.config.failure_log_out,
+            results,
+        )
+
+        print("Adaptation evaluation complete.")
+        print(f"Total cases: {scorecard['total_cases']}")
+        print(f"Initial passes: {scorecard['initial_pass_count']}")
+        print(f"Adapted passes: {scorecard['adapted_pass_count']}")
+        print(f"Adaptation successes: {scorecard['adaptation_success_count']}")
+        print(f"Regressions: {scorecard['regression_count']}")
+        print(f"Initial pass rate: {scorecard['initial_pass_rate']:.2%}")
+        print(f"Adapted pass rate: {scorecard['adapted_pass_rate']:.2%}")
         print(f"Scorecard written to: {scorecard_path}")
         print(f"Failure log written to: {failure_log_path}")
 
@@ -804,7 +1302,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: {error_message}")
         return 1
 
-    app = Stage2CLIApp(config=config, ollama_client=ollama_client)
+    app = Stage3CLIApp(config=config, ollama_client=ollama_client)
     return app.run()
 
 
