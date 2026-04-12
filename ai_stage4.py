@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 """
-Stage 3 local AI assistant.
+Stage 4 local AI assistant.
 
-This file preserves the Stage 1 chat loop and the Stage 2 transfer-learning
-benchmark, then adds a bounded, inspectable Stage 3 rapid-adaptation mode.
+This file preserves the Stage 1 chat loop, the Stage 2 transfer-learning
+benchmark, and the Stage 3 rapid-adaptation benchmark, then adds a bounded,
+inspectable Stage 4 few-shot / zero-shot competence mode.
 
 Important honesty boundary:
 - This is not model training.
 - This is not persistent learning across runs.
-- This is not Stage 4 few-shot / zero-shot competence.
-- This is a small application-level adaptation loop that measures whether the
-  model improves within the same run after a small correction or one/few
-  corrective examples.
+- This is not hidden long-term learning.
+- This is not Stage 3 rapid adaptation.
+- This is not Stage 5 robust reasoning.
+- This is a small application-level few-shot / zero-shot benchmark that
+  measures whether the model can solve unfamiliar bounded tasks from
+  instructions alone or from a tiny number of demonstrations.
 """
 
 import argparse
@@ -36,7 +39,7 @@ else:
     OLLAMA_IMPORT_ERROR = None
 
 
-APP_NAME = "Local AI Assistant - Stage 3"
+APP_NAME = "Local AI Assistant - Stage 4"
 DEFAULT_MODEL = "gemma3:latest"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TEMPERATURE = 0.2
@@ -47,6 +50,9 @@ DEFAULT_STAGE2_SCORECARD_PATH = "stage2_scorecard.json"
 DEFAULT_STAGE2_FAILURE_LOG_PATH = "failure_log_stage2.md"
 DEFAULT_STAGE3_SCORECARD_PATH = "stage3_scorecard.json"
 DEFAULT_STAGE3_FAILURE_LOG_PATH = "failure_log_stage3.md"
+DEFAULT_STAGE4_CASES_PATH = "stage4_fewshot_cases.json"
+DEFAULT_STAGE4_SCORECARD_PATH = "stage4_scorecard.json"
+DEFAULT_STAGE4_FAILURE_LOG_PATH = "failure_log_stage4.md"
 
 HELP_TEXT = """Available commands:
   /help   Show this help message
@@ -59,6 +65,8 @@ SUPPORTED_MODES = [
     "transfer-eval",
     "adapt-demo",
     "adapt-eval",
+    "fewshot-demo",
+    "fewshot-eval",
 ]
 
 ALLOWED_ADAPTATION_TYPES = {
@@ -92,8 +100,9 @@ class ConfigResolver:
     def build_parser() -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
             description=(
-                "Run the Stage 3 local AI assistant against a local Ollama model. "
-                "Modes: chat, transfer-demo, transfer-eval, adapt-demo, adapt-eval."
+                "Run the Stage 4 local AI assistant against a local Ollama model. "
+                "Modes: chat, transfer-demo, transfer-eval, adapt-demo, "
+                "adapt-eval, fewshot-demo, fewshot-eval."
             )
         )
         parser.add_argument(
@@ -101,7 +110,7 @@ class ConfigResolver:
             dest="mode",
             choices=SUPPORTED_MODES,
             default=DEFAULT_MODE,
-            help="Run normal chat, a Stage 2 transfer mode, or a Stage 3 adaptation mode.",
+            help="Run normal chat, a Stage 2 transfer mode, a Stage 3 adaptation mode, or a Stage 4 few-shot mode.",
         )
         parser.add_argument(
             "--model",
@@ -172,18 +181,24 @@ class ConfigResolver:
     def _resolve_default_cases_path(mode: str) -> str:
         if mode in {"adapt-demo", "adapt-eval"}:
             return DEFAULT_STAGE3_CASES_PATH
+        if mode in {"fewshot-demo", "fewshot-eval"}:
+            return DEFAULT_STAGE4_CASES_PATH
         return DEFAULT_STAGE2_CASES_PATH
 
     @staticmethod
     def _resolve_default_scorecard_out(mode: str) -> str:
         if mode in {"adapt-demo", "adapt-eval"}:
             return DEFAULT_STAGE3_SCORECARD_PATH
+        if mode in {"fewshot-demo", "fewshot-eval"}:
+            return DEFAULT_STAGE4_SCORECARD_PATH
         return DEFAULT_STAGE2_SCORECARD_PATH
 
     @staticmethod
     def _resolve_default_failure_log_out(mode: str) -> str:
         if mode in {"adapt-demo", "adapt-eval"}:
             return DEFAULT_STAGE3_FAILURE_LOG_PATH
+        if mode in {"fewshot-demo", "fewshot-eval"}:
+            return DEFAULT_STAGE4_FAILURE_LOG_PATH
         return DEFAULT_STAGE2_FAILURE_LOG_PATH
 
 
@@ -1013,6 +1028,467 @@ class AdaptationEvaluator:
         return None
 
 
+
+
+class Stage4CaseLoadError(Exception):
+    """Raised when the few-shot case file cannot be loaded safely."""
+
+
+@dataclass(frozen=True)
+class FewShotExample:
+    """One tiny demonstration used for a Stage 4 few-shot prompt."""
+
+    example_input: str
+    example_output: str
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "FewShotExample":
+        if not isinstance(mapping, Mapping):
+            raise Stage4CaseLoadError(
+                "Each few-shot example must be a JSON object with 'example_input' and 'example_output'."
+            )
+
+        example_input = mapping.get("example_input")
+        example_output = mapping.get("example_output")
+
+        if not isinstance(example_input, str) or not example_input.strip():
+            raise Stage4CaseLoadError("Each few-shot example must include a non-empty 'example_input'.")
+        if not isinstance(example_output, str) or not example_output.strip():
+            raise Stage4CaseLoadError("Each few-shot example must include a non-empty 'example_output'.")
+
+        return cls(
+            example_input=example_input.strip(),
+            example_output=example_output.strip(),
+        )
+
+
+@dataclass(frozen=True)
+class Stage4FewShotCase:
+    """One curated Stage 4 few-shot / zero-shot competence case."""
+
+    case_id: str
+    task_family: str
+    task_description: str
+    zero_shot_instruction: str
+    few_shot_examples: list[FewShotExample]
+    target_input: str
+    expected_answer: str
+    scoring_type: str
+    novelty_notes: str
+    notes: str
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "Stage4FewShotCase":
+        required_string_fields = [
+            "case_id",
+            "task_family",
+            "task_description",
+            "zero_shot_instruction",
+            "target_input",
+            "expected_answer",
+            "scoring_type",
+            "novelty_notes",
+            "notes",
+        ]
+        missing = [field_name for field_name in required_string_fields + ["few_shot_examples"] if field_name not in mapping]
+        if missing:
+            raise Stage4CaseLoadError(
+                "Few-shot case is missing required field(s): " + ", ".join(missing)
+            )
+
+        values: dict[str, str] = {}
+        for field_name in required_string_fields:
+            value = mapping[field_name]
+            if not isinstance(value, str) or not value.strip():
+                raise Stage4CaseLoadError(
+                    f"Few-shot case field '{field_name}' must be a non-empty string."
+                )
+            values[field_name] = value.strip()
+
+        raw_examples = mapping["few_shot_examples"]
+        if not isinstance(raw_examples, list):
+            raise Stage4CaseLoadError("Few-shot case field 'few_shot_examples' must be a JSON list.")
+        if not 1 <= len(raw_examples) <= 3:
+            raise Stage4CaseLoadError(
+                "Few-shot case field 'few_shot_examples' must contain between 1 and 3 demonstrations."
+            )
+
+        examples = [FewShotExample.from_mapping(item) for item in raw_examples]
+        return cls(few_shot_examples=examples, **values)
+
+
+class FewShotCaseLoader:
+    """Load and validate the Stage 4 few-shot / zero-shot benchmark cases."""
+
+    def load(self, path: str, limit: int | None = None) -> list[Stage4FewShotCase]:
+        case_path = Path(path)
+        if not case_path.exists():
+            raise Stage4CaseLoadError(f"Few-shot case file was not found: {case_path}")
+
+        payload = self._read_json(case_path)
+
+        if isinstance(payload, dict) and "cases" in payload:
+            payload = payload["cases"]
+
+        if not isinstance(payload, list):
+            raise Stage4CaseLoadError(
+                "Few-shot case file must contain a JSON list of case objects "
+                "or an object with a 'cases' list."
+            )
+
+        cases: list[Stage4FewShotCase] = []
+        seen_case_ids: set[str] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise Stage4CaseLoadError(
+                    "Each few-shot case must be a JSON object with the required fields."
+                )
+
+            case = Stage4FewShotCase.from_mapping(item)
+            if case.case_id in seen_case_ids:
+                raise Stage4CaseLoadError(f"Duplicate case_id found: {case.case_id}")
+            seen_case_ids.add(case.case_id)
+            cases.append(case)
+
+        if limit is not None:
+            return cases[:limit]
+        return cases
+
+    def _read_json(self, case_path: Path) -> Any:
+        try:
+            raw_text = case_path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise Stage4CaseLoadError(f"Could not read few-shot case file: {exc}") from exc
+
+        try:
+            return json.loads(raw_text)
+        except json.JSONDecodeError as exc:
+            raise Stage4CaseLoadError(f"Few-shot case file is not valid JSON: {exc}") from exc
+
+
+class FewShotPromptBuilder:
+    """Build explicit, inspectable prompts for Stage 4 few-shot / zero-shot competence."""
+
+    def build_zero_shot_prompt(self, case: Stage4FewShotCase) -> str:
+        return (
+            "You are being evaluated on a bounded Stage 4 few-shot / zero-shot competence benchmark.\n"
+            "This is the zero-shot condition.\n"
+            "You must solve the task from the written task description and instruction only.\n"
+            "Do not use any correction loop or ask follow-up questions.\n"
+            "Return only the final answer. Do not explain your reasoning.\n\n"
+            "=== TASK FAMILY ===\n"
+            f"{case.task_family}\n\n"
+            "=== TASK DESCRIPTION ===\n"
+            f"{case.task_description}\n\n"
+            "=== ZERO-SHOT INSTRUCTION ===\n"
+            f"{case.zero_shot_instruction}\n\n"
+            "=== TARGET INPUT ===\n"
+            f"{case.target_input}\n\n"
+            "=== FINAL ANSWER ==="
+        )
+
+    def build_few_shot_prompt(self, case: Stage4FewShotCase) -> str:
+        lines = [
+            "You are being evaluated on a bounded Stage 4 few-shot / zero-shot competence benchmark.",
+            "This is the few-shot condition.",
+            "You must solve the task from the same written task description plus a tiny number of demonstrations.",
+            "The demonstrations show the pattern, but they are not corrections to any earlier answer.",
+            "Return only the final answer. Do not explain your reasoning.",
+            "",
+            "=== TASK FAMILY ===",
+            case.task_family,
+            "",
+            "=== TASK DESCRIPTION ===",
+            case.task_description,
+            "",
+            "=== ZERO-SHOT INSTRUCTION ===",
+            case.zero_shot_instruction,
+            "",
+            "=== FEW-SHOT DEMONSTRATIONS ===",
+        ]
+
+        for index, example in enumerate(case.few_shot_examples, start=1):
+            lines.extend(
+                [
+                    f"Example {index} input:",
+                    example.example_input,
+                    f"Example {index} output:",
+                    example.example_output,
+                    "",
+                ]
+            )
+
+        lines.extend(
+            [
+                "=== TARGET INPUT ===",
+                case.target_input,
+                "",
+                "=== FINAL ANSWER ===",
+            ]
+        )
+        return "\n".join(lines)
+
+
+@dataclass
+class FewShotCaseResult:
+    """Structured result for one Stage 4 few-shot / zero-shot case."""
+
+    case_id: str
+    task_family: str
+    scoring_type: str
+    expected_answer: str
+    zero_shot_answer: str
+    few_shot_answer: str
+    zero_shot_pass: bool
+    few_shot_pass: bool
+    few_shot_helped: bool
+    regression: bool
+    zero_shot_scoring_error: str | None = None
+    few_shot_scoring_error: str | None = None
+    probable_failure_reason: str | None = None
+
+
+class FewShotEvaluator:
+    """Run zero-shot vs few-shot evaluation for Stage 4."""
+
+    def __init__(
+        self,
+        ollama_client: OllamaChatClient,
+        model: str,
+        temperature: float,
+        prompt_builder: FewShotPromptBuilder | None = None,
+        scoring_engine: ScoringEngine | None = None,
+    ) -> None:
+        self.ollama_client = ollama_client
+        self.model = model
+        self.temperature = temperature
+        self.prompt_builder = prompt_builder if prompt_builder is not None else FewShotPromptBuilder()
+        self.scoring_engine = scoring_engine if scoring_engine is not None else ScoringEngine()
+
+    def evaluate_case(self, case: Stage4FewShotCase) -> FewShotCaseResult:
+        zero_shot_answer = self._run_single_prompt(self.prompt_builder.build_zero_shot_prompt(case))
+        few_shot_answer = self._run_single_prompt(self.prompt_builder.build_few_shot_prompt(case))
+
+        zero_shot_pass, zero_shot_scoring_error = self.scoring_engine.score_answer(
+            answer=zero_shot_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+        few_shot_pass, few_shot_scoring_error = self.scoring_engine.score_answer(
+            answer=few_shot_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+
+        few_shot_helped = (not zero_shot_pass) and few_shot_pass
+        regression = zero_shot_pass and (not few_shot_pass)
+        probable_failure_reason = self._infer_failure_reason(
+            zero_shot_answer=zero_shot_answer,
+            few_shot_answer=few_shot_answer,
+            zero_shot_pass=zero_shot_pass,
+            few_shot_pass=few_shot_pass,
+            zero_shot_scoring_error=zero_shot_scoring_error,
+            few_shot_scoring_error=few_shot_scoring_error,
+        )
+
+        return FewShotCaseResult(
+            case_id=case.case_id,
+            task_family=case.task_family,
+            scoring_type=case.scoring_type,
+            expected_answer=case.expected_answer,
+            zero_shot_answer=zero_shot_answer,
+            few_shot_answer=few_shot_answer,
+            zero_shot_pass=zero_shot_pass,
+            few_shot_pass=few_shot_pass,
+            few_shot_helped=few_shot_helped,
+            regression=regression,
+            zero_shot_scoring_error=zero_shot_scoring_error,
+            few_shot_scoring_error=few_shot_scoring_error,
+            probable_failure_reason=probable_failure_reason,
+        )
+
+    def evaluate_cases(self, cases: Sequence[Stage4FewShotCase]) -> list[FewShotCaseResult]:
+        return [self.evaluate_case(case) for case in cases]
+
+    def build_scorecard(self, results: Sequence[FewShotCaseResult]) -> dict[str, Any]:
+        total_cases = len(results)
+        zero_shot_pass_count = sum(result.zero_shot_pass for result in results)
+        few_shot_pass_count = sum(result.few_shot_pass for result in results)
+        few_shot_improvement_count = sum(result.few_shot_helped for result in results)
+        regression_count = sum(result.regression for result in results)
+
+        zero_shot_pass_rate = (zero_shot_pass_count / total_cases) if total_cases else 0.0
+        few_shot_pass_rate = (few_shot_pass_count / total_cases) if total_cases else 0.0
+
+        return {
+            "total_cases": total_cases,
+            "zero_shot_pass_count": zero_shot_pass_count,
+            "few_shot_pass_count": few_shot_pass_count,
+            "few_shot_improvement_count": few_shot_improvement_count,
+            "regression_count": regression_count,
+            "zero_shot_pass_rate": round(zero_shot_pass_rate, 4),
+            "pass_rate": round(few_shot_pass_rate, 4),
+            "few_shot_pass_rate": round(few_shot_pass_rate, 4),
+            "per_case_details": [asdict(result) for result in results],
+        }
+
+    def _run_single_prompt(self, prompt: str) -> str:
+        try:
+            return self.ollama_client.send_chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+        except OllamaServiceError as exc:
+            return f"ERROR: {exc}"
+
+    def _infer_failure_reason(
+        self,
+        zero_shot_answer: str,
+        few_shot_answer: str,
+        zero_shot_pass: bool,
+        few_shot_pass: bool,
+        zero_shot_scoring_error: str | None,
+        few_shot_scoring_error: str | None,
+    ) -> str | None:
+        if zero_shot_pass and few_shot_pass:
+            return None
+
+        if zero_shot_scoring_error or few_shot_scoring_error:
+            problems = [item for item in [zero_shot_scoring_error, few_shot_scoring_error] if item]
+            return " ; ".join(problems)
+
+        if zero_shot_answer.startswith("ERROR:") or few_shot_answer.startswith("ERROR:"):
+            return "A model call failed during evaluation."
+
+        if zero_shot_pass and not few_shot_pass:
+            return "Few-shot demonstrations appear to have distracted a previously correct zero-shot answer."
+
+        if (not zero_shot_pass) and (not few_shot_pass):
+            zero_norm = self.scoring_engine.normalize_whitespace(zero_shot_answer).casefold()
+            few_norm = self.scoring_engine.normalize_whitespace(few_shot_answer).casefold()
+            if zero_norm == few_norm:
+                return "Few-shot demonstrations did not materially change the answer."
+            return "The task description or demonstrations were still not applied correctly."
+
+        return None
+
+
+class Stage4FailureLogWriter:
+    """Write human-readable markdown failure logs for Stages 2, 3, and 4."""
+
+    def write_transfer_log(self, path: str | Path, results: Sequence[TransferCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.transfer_assisted_pass]
+
+        lines: list[str] = [
+            "# Stage 2 Failure Log",
+            "",
+            f"Total failed transfer-assisted cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All transfer-assisted cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Expected answer: `{result.expected_answer}`",
+                        f"- Baseline answer: `{result.baseline_answer}`",
+                        f"- Transfer-assisted answer: `{result.transfer_assisted_answer}`",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+    def write_adaptation_log(self, path: str | Path, results: Sequence[AdaptationCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.adapted_pass]
+
+        lines: list[str] = [
+            "# Stage 3 Failure Log",
+            "",
+            f"Total failed adapted cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All adapted follow-up cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Expected initial answer: `{result.expected_initial_answer}`",
+                        f"- Initial answer: `{result.initial_answer}`",
+                        f"- Feedback received: `{result.feedback_payload}`",
+                        f"- Expected follow-up answer: `{result.expected_followup_answer}`",
+                        f"- Adapted answer: `{result.adapted_answer}`",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+    def write_fewshot_log(self, path: str | Path, results: Sequence[FewShotCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.few_shot_pass]
+
+        lines: list[str] = [
+            "# Stage 4 Failure Log",
+            "",
+            f"Total failed few-shot cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All few-shot cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Task family: {result.task_family}",
+                        f"- Expected answer: `{result.expected_answer}`",
+                        f"- Zero-shot answer: `{result.zero_shot_answer}`",
+                        f"- Few-shot answer: `{result.few_shot_answer}`",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+
 class ScorecardWriter:
     """Write a structured JSON scorecard to disk."""
 
@@ -1281,6 +1757,107 @@ class Stage3CLIApp:
         return 0
 
 
+class Stage4CLIApp(Stage3CLIApp):
+    """Top-level controller preserving Stage 1-3 behavior and adding Stage 4 modes."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        ollama_client: OllamaChatClient,
+        transfer_case_loader: TransferCaseLoader | None = None,
+        adaptation_case_loader: AdaptationCaseLoader | None = None,
+        fewshot_case_loader: FewShotCaseLoader | None = None,
+        scorecard_writer: ScorecardWriter | None = None,
+        failure_log_writer: Stage4FailureLogWriter | None = None,
+    ) -> None:
+        resolved_failure_log_writer = (
+            failure_log_writer if failure_log_writer is not None else Stage4FailureLogWriter()
+        )
+        super().__init__(
+            config=config,
+            ollama_client=ollama_client,
+            transfer_case_loader=transfer_case_loader,
+            adaptation_case_loader=adaptation_case_loader,
+            scorecard_writer=scorecard_writer,
+            failure_log_writer=resolved_failure_log_writer,
+        )
+        self.fewshot_case_loader = (
+            fewshot_case_loader if fewshot_case_loader is not None else FewShotCaseLoader()
+        )
+
+    def run(self) -> int:
+        if self.config.mode in {"fewshot-demo", "fewshot-eval"}:
+            return self._run_fewshot_modes()
+        return super().run()
+
+    def _run_fewshot_modes(self) -> int:
+        try:
+            cases = self.fewshot_case_loader.load(self.config.cases_path, limit=self.config.limit)
+        except Stage4CaseLoadError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        if not cases:
+            print("Error: The few-shot case file loaded successfully but contained no cases.")
+            return 1
+
+        evaluator = FewShotEvaluator(
+            ollama_client=self.ollama_client,
+            model=self.config.model,
+            temperature=self.config.temperature,
+        )
+
+        if self.config.mode == "fewshot-demo":
+            return self._run_fewshot_demo(evaluator=evaluator, cases=cases)
+
+        return self._run_fewshot_eval(evaluator=evaluator, cases=cases)
+
+    def _run_fewshot_demo(
+        self,
+        evaluator: FewShotEvaluator,
+        cases: Sequence[Stage4FewShotCase],
+    ) -> int:
+        print(f"Loaded few-shot cases: {len(cases)}")
+
+        for index, case in enumerate(cases, start=1):
+            result = evaluator.evaluate_case(case)
+            print("-" * 72)
+            print(f"Demo case {index}: {case.case_id}")
+            print(f"Task family: {case.task_family}")
+            print("Task description:")
+            print(case.task_description)
+            print(f"Zero-shot answer: {result.zero_shot_answer}")
+            print(f"Few-shot answer: {result.few_shot_answer}")
+            print(f"Expected answer: {case.expected_answer}")
+            print(f"Few-shot helped: {'YES' if result.few_shot_helped else 'NO'}")
+
+        return 0
+
+    def _run_fewshot_eval(
+        self,
+        evaluator: FewShotEvaluator,
+        cases: Sequence[Stage4FewShotCase],
+    ) -> int:
+        results = evaluator.evaluate_cases(cases)
+        scorecard = evaluator.build_scorecard(results)
+
+        scorecard_path = self.scorecard_writer.write(self.config.scorecard_out, scorecard)
+        failure_log_path = self.failure_log_writer.write_fewshot_log(self.config.failure_log_out, results)
+
+        print("Few-shot evaluation complete.")
+        print(f"Total cases: {scorecard['total_cases']}")
+        print(f"Zero-shot passes: {scorecard['zero_shot_pass_count']}")
+        print(f"Few-shot passes: {scorecard['few_shot_pass_count']}")
+        print(f"Few-shot improvements: {scorecard['few_shot_improvement_count']}")
+        print(f"Regressions: {scorecard['regression_count']}")
+        print(f"Zero-shot pass rate: {scorecard['zero_shot_pass_rate']:.2%}")
+        print(f"Few-shot pass rate: {scorecard['few_shot_pass_rate']:.2%}")
+        print(f"Scorecard written to: {scorecard_path}")
+        print(f"Failure log written to: {failure_log_path}")
+
+        return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     config = ConfigResolver.resolve(argv=argv)
 
@@ -1302,7 +1879,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: {error_message}")
         return 1
 
-    app = Stage3CLIApp(config=config, ollama_client=ollama_client)
+    app = Stage4CLIApp(config=config, ollama_client=ollama_client)
     return app.run()
 
 
