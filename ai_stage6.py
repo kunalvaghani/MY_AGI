@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 """
-Stage 5 local AI assistant.
+Stage 6 local AI assistant.
 
 This file preserves the Stage 1 chat loop, the Stage 2 transfer-learning
 benchmark, the Stage 3 rapid-adaptation benchmark, and the Stage 4 few-shot /
 zero-shot benchmark, then adds a bounded, inspectable Stage 5 robust
-reasoning mode.
+reasoning mode and a separate Stage 6 common-sense understanding mode.
 
 Important honesty boundary:
 - This is not model training.
@@ -16,9 +16,9 @@ Important honesty boundary:
 - This is not Stage 4 few-shot / zero-shot competence.
 - This is not Stage 9 long-horizon planning.
 - This is not Stage 11 subgoal decomposition.
-- This is a small application-level robust reasoning benchmark that compares
-  a direct-answer baseline against a structured reasoning condition and a
-  bounded verification pass.
+- This is not model training or persistent learning.
+- Stage 6 is a bounded common-sense benchmark about everyday implied facts.
+- It does not claim world modeling, social intelligence, or hidden long-term learning.
 """
 
 import argparse
@@ -42,7 +42,7 @@ else:
     OLLAMA_IMPORT_ERROR = None
 
 
-APP_NAME = "Local AI Assistant - Stage 5"
+APP_NAME = "Local AI Assistant - Stage 6"
 DEFAULT_MODEL = "gemma3:latest"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TEMPERATURE = 0.2
@@ -51,14 +51,17 @@ DEFAULT_STAGE2_CASES_PATH = "stage2_transfer_cases.json"
 DEFAULT_STAGE3_CASES_PATH = "stage3_adaptation_cases.json"
 DEFAULT_STAGE4_CASES_PATH = "stage4_fewshot_cases.json"
 DEFAULT_STAGE5_CASES_PATH = "stage5_reasoning_cases.json"
+DEFAULT_STAGE6_CASES_PATH = "stage6_commonsense_cases.json"
 DEFAULT_STAGE2_SCORECARD_PATH = "stage2_scorecard.json"
 DEFAULT_STAGE3_SCORECARD_PATH = "stage3_scorecard.json"
 DEFAULT_STAGE4_SCORECARD_PATH = "stage4_scorecard.json"
 DEFAULT_STAGE5_SCORECARD_PATH = "stage5_scorecard.json"
+DEFAULT_STAGE6_SCORECARD_PATH = "stage6_scorecard.json"
 DEFAULT_STAGE2_FAILURE_LOG_PATH = "failure_log_stage2.md"
 DEFAULT_STAGE3_FAILURE_LOG_PATH = "failure_log_stage3.md"
 DEFAULT_STAGE4_FAILURE_LOG_PATH = "failure_log_stage4.md"
 DEFAULT_STAGE5_FAILURE_LOG_PATH = "failure_log_stage5.md"
+DEFAULT_STAGE6_FAILURE_LOG_PATH = "failure_log_stage6.md"
 
 HELP_TEXT = """Available commands:
   /help   Show this help message
@@ -75,6 +78,8 @@ SUPPORTED_MODES = [
     "fewshot-eval",
     "reason-demo",
     "reason-eval",
+    "commonsense-demo",
+    "commonsense-eval",
 ]
 
 ALLOWED_ADAPTATION_TYPES = {
@@ -94,6 +99,8 @@ ALLOWED_REASONING_SCORING_TYPES = {
     "custom normalized exact",
     "normalized exact",
 }
+
+ALLOWED_COMMONSENSE_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
 
 
 def read_json_payload(path: str | Path, label: str) -> Any:
@@ -146,9 +153,9 @@ class ConfigResolver:
     def build_parser() -> argparse.ArgumentParser:
         parser = argparse.ArgumentParser(
             description=(
-                "Run the Stage 5 local AI assistant against a local Ollama model. "
+                "Run the Stage 6 local AI assistant against a local Ollama model. "
                 "Modes: chat, transfer-demo, transfer-eval, adapt-demo, adapt-eval, "
-                "fewshot-demo, fewshot-eval, reason-demo, reason-eval."
+                "fewshot-demo, fewshot-eval, reason-demo, reason-eval, commonsense-demo, commonsense-eval."
             )
         )
         parser.add_argument(
@@ -156,7 +163,7 @@ class ConfigResolver:
             dest="mode",
             choices=SUPPORTED_MODES,
             default=DEFAULT_MODE,
-            help="Run normal chat, Stage 2 transfer modes, Stage 3 adaptation modes, Stage 4 few-shot modes, or Stage 5 reasoning modes.",
+            help="Run normal chat, Stage 2 transfer modes, Stage 3 adaptation modes, Stage 4 few-shot modes, Stage 5 reasoning modes, or Stage 6 commonsense modes.",
         )
         parser.add_argument(
             "--model",
@@ -226,6 +233,8 @@ class ConfigResolver:
             return DEFAULT_STAGE4_CASES_PATH
         if mode in {"reason-demo", "reason-eval"}:
             return DEFAULT_STAGE5_CASES_PATH
+        if mode in {"commonsense-demo", "commonsense-eval"}:
+            return DEFAULT_STAGE6_CASES_PATH
         return DEFAULT_STAGE2_CASES_PATH
 
     @staticmethod
@@ -236,6 +245,8 @@ class ConfigResolver:
             return DEFAULT_STAGE4_SCORECARD_PATH
         if mode in {"reason-demo", "reason-eval"}:
             return DEFAULT_STAGE5_SCORECARD_PATH
+        if mode in {"commonsense-demo", "commonsense-eval"}:
+            return DEFAULT_STAGE6_SCORECARD_PATH
         return DEFAULT_STAGE2_SCORECARD_PATH
 
     @staticmethod
@@ -246,6 +257,8 @@ class ConfigResolver:
             return DEFAULT_STAGE4_FAILURE_LOG_PATH
         if mode in {"reason-demo", "reason-eval"}:
             return DEFAULT_STAGE5_FAILURE_LOG_PATH
+        if mode in {"commonsense-demo", "commonsense-eval"}:
+            return DEFAULT_STAGE6_FAILURE_LOG_PATH
         return DEFAULT_STAGE2_FAILURE_LOG_PATH
 
 
@@ -1886,6 +1899,547 @@ class ReasoningEvaluator:
         return None
 
 
+class Stage6CaseLoadError(Exception):
+    """Raised when the commonsense case file cannot be loaded safely."""
+
+
+ALLOWED_COMMONSENSE_SCENARIO_TYPES = {
+    "physical object interaction",
+    "containment/support/spillage",
+    "heat/cold/wetness",
+    "breakage/damage",
+    "simple temporal routine",
+    "simple location/visibility",
+    "simple social appropriateness",
+    "simple intention / ordinary human behavior",
+    "basic everyday safety consequence",
+    "object affordance / tool use expectation",
+}
+
+
+@dataclass(frozen=True)
+class Stage6CommonSenseCase:
+    """One curated Stage 6 commonsense-understanding case."""
+
+    case_id: str
+    scenario_type: str
+    scenario_text: str
+    question: str
+    expected_answer: str
+    scoring_type: str
+    commonsense_focus: str
+    hidden_assumption_notes: str
+    novelty_notes: str
+    notes: str
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "Stage6CommonSenseCase":
+        required_fields = [
+            "case_id",
+            "scenario_type",
+            "scenario_text",
+            "question",
+            "expected_answer",
+            "scoring_type",
+            "commonsense_focus",
+            "hidden_assumption_notes",
+            "novelty_notes",
+            "notes",
+        ]
+        missing = [field_name for field_name in required_fields if field_name not in mapping]
+        if missing:
+            raise Stage6CaseLoadError(
+                "Common-sense case is missing required field(s): " + ", ".join(missing)
+            )
+
+        values: dict[str, str] = {}
+        for field_name in required_fields:
+            values[field_name] = require_non_empty_string(
+                mapping=mapping,
+                field_name=field_name,
+                error_type=Stage6CaseLoadError,
+                object_label="Common-sense case",
+            )
+
+        scenario_key = values["scenario_type"].strip().lower()
+        if scenario_key not in ALLOWED_COMMONSENSE_SCENARIO_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_COMMONSENSE_SCENARIO_TYPES))
+            raise Stage6CaseLoadError(
+                f"Unsupported scenario_type '{values['scenario_type']}'. Allowed values: {allowed}."
+            )
+
+        scoring_key = " ".join(values["scoring_type"].strip().lower().replace("_", " ").split())
+        if scoring_key not in ALLOWED_REASONING_SCORING_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_REASONING_SCORING_TYPES))
+            raise Stage6CaseLoadError(
+                f"Unsupported Stage 6 scoring_type '{values['scoring_type']}'. Allowed values: {allowed}."
+            )
+
+        return cls(**values)
+
+
+class CommonSenseCaseLoader:
+    """Load and validate the Stage 6 commonsense benchmark cases."""
+
+    def load(self, path: str, limit: int | None = None) -> list[Stage6CommonSenseCase]:
+        case_path = Path(path)
+        if not case_path.exists():
+            raise Stage6CaseLoadError(f"Common-sense case file was not found: {case_path}")
+
+        try:
+            payload = read_json_payload(case_path, "common-sense case")
+        except ValueError as exc:
+            raise Stage6CaseLoadError(str(exc)) from exc
+
+        if isinstance(payload, dict) and "cases" in payload:
+            payload = payload["cases"]
+
+        if not isinstance(payload, list):
+            raise Stage6CaseLoadError(
+                "Common-sense case file must contain a JSON list of case objects "
+                "or an object with a 'cases' list."
+            )
+
+        cases: list[Stage6CommonSenseCase] = []
+        seen_case_ids: set[str] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise Stage6CaseLoadError(
+                    "Each common-sense case must be a JSON object with the required fields."
+                )
+
+            case = Stage6CommonSenseCase.from_mapping(item)
+            if case.case_id in seen_case_ids:
+                raise Stage6CaseLoadError(f"Duplicate case_id found: {case.case_id}")
+            seen_case_ids.add(case.case_id)
+            cases.append(case)
+
+        return cases[:limit] if limit is not None else cases
+
+
+@dataclass(frozen=True)
+class CommonSenseArtifact:
+    """Compact commonsense artifact requested from the model."""
+
+    stated_facts: list[str]
+    implied_commonsense_assumptions: list[str]
+    everyday_rule_or_expectation: str
+    tentative_answer: str
+    final_answer: str
+
+
+@dataclass(frozen=True)
+class CommonSenseVerificationArtifact:
+    """Compact verification artifact produced in the bounded Stage 6 verification pass."""
+
+    verification_note: str
+    verified_final_answer: str
+
+
+class CommonSensePromptBuilder:
+    """Build explicit direct, structured, and verification prompts for Stage 6."""
+
+    def build_direct_prompt(self, case: Stage6CommonSenseCase) -> str:
+        return (
+            "You are being evaluated on a bounded Stage 6 common-sense understanding benchmark.\n"
+            "This is the direct-answer baseline condition.\n"
+            "Answer the everyday scenario question directly, with no structured commonsense scaffold.\n"
+            "Return only the final answer. Do not explain your reasoning.\n\n"
+            "=== SCENARIO TYPE ===\n"
+            f"{case.scenario_type}\n\n"
+            "=== SCENARIO ===\n"
+            f"{case.scenario_text}\n\n"
+            "=== QUESTION ===\n"
+            f"{case.question}\n\n"
+            "=== FINAL ANSWER ==="
+        )
+
+    def build_commonsense_prompt(self, case: Stage6CommonSenseCase) -> str:
+        return (
+            "You are being evaluated on a bounded Stage 6 common-sense understanding benchmark.\n"
+            "This is the commonsense-grounded condition.\n"
+            "Return JSON only. Do not use markdown fences.\n"
+            "Do not provide hidden chain-of-thought or long essays.\n"
+            "Fill this exact schema with brief values:\n"
+            "{\n"
+            '  "stated_facts": ["fact 1", "fact 2"],\n'
+            '  "implied_commonsense_assumptions": ["assumption 1", "assumption 2"],\n'
+            '  "everyday_rule_or_expectation": "brief everyday rule or expectation",\n'
+            '  "tentative_answer": "candidate answer",\n'
+            '  "final_answer": "best current final answer"\n'
+            "}\n"
+            "Requirements:\n"
+            "- stated_facts must contain 1 to 6 short facts explicitly stated in the scenario.\n"
+            "- implied_commonsense_assumptions must contain 1 to 5 short ordinary-world assumptions.\n"
+            "- Keep every field compact and inspectable.\n"
+            "- final_answer must contain the answer you currently endorse.\n\n"
+            "=== SCENARIO TYPE ===\n"
+            f"{case.scenario_type}\n\n"
+            "=== COMMONSENSE FOCUS ===\n"
+            f"{case.commonsense_focus}\n\n"
+            "=== SCENARIO ===\n"
+            f"{case.scenario_text}\n\n"
+            "=== QUESTION ===\n"
+            f"{case.question}"
+        )
+
+    def build_verification_prompt(
+        self,
+        case: Stage6CommonSenseCase,
+        artifact: CommonSenseArtifact,
+    ) -> str:
+        artifact_json = json.dumps(asdict(artifact), ensure_ascii=False, indent=2)
+        return (
+            "You are being evaluated on a bounded Stage 6 common-sense understanding benchmark.\n"
+            "This is the verification condition.\n"
+            "Check whether the implied assumptions and candidate answer are consistent with the scenario.\n"
+            "Return JSON only. Do not use markdown fences.\n"
+            "Return this exact schema:\n"
+            "{\n"
+            '  "verification_note": "brief note about whether the assumptions and answer fit the scenario",\n'
+            '  "verified_final_answer": "the final answer to use for scoring"\n'
+            "}\n"
+            "If the candidate final answer is wrong, correct it.\n"
+            "Keep the note brief and use the verified_final_answer field for the answer itself.\n\n"
+            "=== SCENARIO TYPE ===\n"
+            f"{case.scenario_type}\n\n"
+            "=== SCENARIO ===\n"
+            f"{case.scenario_text}\n\n"
+            "=== QUESTION ===\n"
+            f"{case.question}\n\n"
+            "=== CANDIDATE COMMONSENSE ARTIFACT ===\n"
+            f"{artifact_json}"
+        )
+
+
+class CommonSenseOutputParser:
+    """Safely parse the structured Stage 6 commonsense outputs."""
+
+    def parse_commonsense_artifact(
+        self,
+        raw_output: str,
+    ) -> tuple[CommonSenseArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Common-sense output must be a JSON object."
+
+        required_keys = {
+            "stated_facts",
+            "implied_commonsense_assumptions",
+            "everyday_rule_or_expectation",
+            "tentative_answer",
+            "final_answer",
+        }
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Common-sense output is missing required key(s): " + ", ".join(sorted(missing))
+
+        stated_facts = payload.get("stated_facts")
+        implied_assumptions = payload.get("implied_commonsense_assumptions")
+        if not isinstance(stated_facts, list) or not stated_facts:
+            return None, "Common-sense output field 'stated_facts' must be a non-empty JSON list."
+        if not isinstance(implied_assumptions, list) or not implied_assumptions:
+            return None, "Common-sense output field 'implied_commonsense_assumptions' must be a non-empty JSON list."
+
+        normalized_facts: list[str] = []
+        for item in stated_facts:
+            if not isinstance(item, str) or not item.strip():
+                return None, "Each stated fact must be a non-empty string."
+            normalized_facts.append(item.strip())
+
+        normalized_assumptions: list[str] = []
+        for item in implied_assumptions:
+            if not isinstance(item, str) or not item.strip():
+                return None, "Each implied common-sense assumption must be a non-empty string."
+            normalized_assumptions.append(item.strip())
+
+        if len(normalized_facts) > 6:
+            return None, "Common-sense output field 'stated_facts' must contain at most 6 items."
+        if len(normalized_assumptions) > 5:
+            return None, "Common-sense output field 'implied_commonsense_assumptions' must contain at most 5 items."
+
+        everyday_rule_or_expectation = payload.get("everyday_rule_or_expectation")
+        tentative_answer = payload.get("tentative_answer")
+        final_answer = payload.get("final_answer")
+
+        string_fields = {
+            "everyday_rule_or_expectation": everyday_rule_or_expectation,
+            "tentative_answer": tentative_answer,
+            "final_answer": final_answer,
+        }
+        for key, value in string_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                return None, f"Common-sense output field '{key}' must be a non-empty string."
+
+        return (
+            CommonSenseArtifact(
+                stated_facts=normalized_facts,
+                implied_commonsense_assumptions=normalized_assumptions,
+                everyday_rule_or_expectation=everyday_rule_or_expectation.strip(),
+                tentative_answer=tentative_answer.strip(),
+                final_answer=final_answer.strip(),
+            ),
+            None,
+        )
+
+    def parse_verification_output(
+        self,
+        raw_output: str,
+    ) -> tuple[CommonSenseVerificationArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Verification output must be a JSON object."
+
+        required_keys = {"verification_note", "verified_final_answer"}
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Verification output is missing required key(s): " + ", ".join(sorted(missing))
+
+        verification_note = payload.get("verification_note")
+        verified_final_answer = payload.get("verified_final_answer")
+
+        if not isinstance(verification_note, str) or not verification_note.strip():
+            return None, "Verification output field 'verification_note' must be a non-empty string."
+        if not isinstance(verified_final_answer, str) or not verified_final_answer.strip():
+            return None, "Verification output field 'verified_final_answer' must be a non-empty string."
+
+        return (
+            CommonSenseVerificationArtifact(
+                verification_note=verification_note.strip(),
+                verified_final_answer=verified_final_answer.strip(),
+            ),
+            None,
+        )
+
+    def _extract_first_json_object(self, raw_output: str) -> Any:
+        text = raw_output.strip()
+        if not text:
+            raise ValueError("Model returned an empty structured output.")
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                payload, _end = decoder.raw_decode(text[index:])
+                return payload
+            except json.JSONDecodeError:
+                continue
+
+        raise ValueError("Could not find a valid JSON object in the model output.")
+
+
+@dataclass
+class CommonSenseCaseResult:
+    """Structured result for one Stage 6 common-sense case."""
+
+    case_id: str
+    scenario_type: str
+    scoring_type: str
+    expected_answer: str
+    direct_answer: str
+    commonsense_raw_output: str
+    parsed_commonsense_artifact: dict[str, Any] | None
+    verified_final_answer: str
+    direct_pass: bool
+    commonsense_pass: bool
+    commonsense_helped: bool
+    regression: bool
+    direct_scoring_error: str | None = None
+    commonsense_scoring_error: str | None = None
+    parse_error: str | None = None
+    probable_failure_reason: str | None = None
+    verification_raw_output: str | None = None
+    verification_note: str | None = None
+    commonsense_grounded_answer: str | None = None
+
+
+class CommonSenseEvaluator:
+    """Run direct-answer versus structured-and-verified commonsense evaluation for Stage 6."""
+
+    def __init__(
+        self,
+        ollama_client: OllamaChatClient,
+        model: str,
+        temperature: float,
+        prompt_builder: CommonSensePromptBuilder | None = None,
+        output_parser: CommonSenseOutputParser | None = None,
+        scoring_engine: ScoringEngine | None = None,
+    ) -> None:
+        self.ollama_client = ollama_client
+        self.model = model
+        self.temperature = temperature
+        self.prompt_builder = prompt_builder if prompt_builder is not None else CommonSensePromptBuilder()
+        self.output_parser = output_parser if output_parser is not None else CommonSenseOutputParser()
+        self.scoring_engine = scoring_engine if scoring_engine is not None else ScoringEngine()
+
+    def evaluate_case(self, case: Stage6CommonSenseCase) -> CommonSenseCaseResult:
+        direct_answer = self._run_single_prompt(self.prompt_builder.build_direct_prompt(case))
+        commonsense_raw_output = self._run_single_prompt(self.prompt_builder.build_commonsense_prompt(case))
+
+        parsed_artifact, parse_error = self.output_parser.parse_commonsense_artifact(commonsense_raw_output)
+        commonsense_grounded_answer = parsed_artifact.final_answer if parsed_artifact is not None else None
+
+        verification_raw_output: str | None = None
+        verification_note: str | None = None
+        verified_final_answer = ""
+
+        if parsed_artifact is not None:
+            verification_raw_output = self._run_single_prompt(
+                self.prompt_builder.build_verification_prompt(case, parsed_artifact)
+            )
+            parsed_verification, verification_parse_error = self.output_parser.parse_verification_output(
+                verification_raw_output
+            )
+
+            if verification_parse_error:
+                parse_error = self._combine_errors(parse_error, verification_parse_error)
+                verification_note = (
+                    "Verification output could not be parsed cleanly; using commonsense-grounded final answer."
+                )
+                verified_final_answer = parsed_artifact.final_answer
+            else:
+                assert parsed_verification is not None
+                verification_note = parsed_verification.verification_note
+                verified_final_answer = parsed_verification.verified_final_answer
+        else:
+            verification_note = None
+            verified_final_answer = ""
+
+        direct_pass, direct_scoring_error = self.scoring_engine.score_answer(
+            answer=direct_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+        commonsense_pass, commonsense_scoring_error = self.scoring_engine.score_answer(
+            answer=verified_final_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+
+        commonsense_helped = (not direct_pass) and commonsense_pass
+        regression = direct_pass and (not commonsense_pass)
+
+        probable_failure_reason = self._infer_failure_reason(
+            direct_answer=direct_answer,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            commonsense_pass=commonsense_pass,
+            direct_scoring_error=direct_scoring_error,
+            commonsense_scoring_error=commonsense_scoring_error,
+            parse_error=parse_error,
+        )
+
+        return CommonSenseCaseResult(
+            case_id=case.case_id,
+            scenario_type=case.scenario_type,
+            scoring_type=case.scoring_type,
+            expected_answer=case.expected_answer,
+            direct_answer=direct_answer,
+            commonsense_raw_output=commonsense_raw_output,
+            parsed_commonsense_artifact=asdict(parsed_artifact) if parsed_artifact is not None else None,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            commonsense_pass=commonsense_pass,
+            commonsense_helped=commonsense_helped,
+            regression=regression,
+            direct_scoring_error=direct_scoring_error,
+            commonsense_scoring_error=commonsense_scoring_error,
+            parse_error=parse_error,
+            probable_failure_reason=probable_failure_reason,
+            verification_raw_output=verification_raw_output,
+            verification_note=verification_note,
+            commonsense_grounded_answer=commonsense_grounded_answer,
+        )
+
+    def evaluate_cases(self, cases: Sequence[Stage6CommonSenseCase]) -> list[CommonSenseCaseResult]:
+        return [self.evaluate_case(case) for case in cases]
+
+    def build_scorecard(self, results: Sequence[CommonSenseCaseResult]) -> dict[str, Any]:
+        total_cases = len(results)
+        direct_pass_count = sum(result.direct_pass for result in results)
+        commonsense_pass_count = sum(result.commonsense_pass for result in results)
+        commonsense_improvement_count = sum(result.commonsense_helped for result in results)
+        regression_count = sum(result.regression for result in results)
+        parse_error_count = sum(1 for result in results if result.parse_error)
+
+        direct_pass_rate = (direct_pass_count / total_cases) if total_cases else 0.0
+        commonsense_pass_rate = (commonsense_pass_count / total_cases) if total_cases else 0.0
+
+        return {
+            "total_cases": total_cases,
+            "direct_pass_count": direct_pass_count,
+            "commonsense_pass_count": commonsense_pass_count,
+            "commonsense_improvement_count": commonsense_improvement_count,
+            "regression_count": regression_count,
+            "parse_error_count": parse_error_count,
+            "direct_pass_rate": round(direct_pass_rate, 4),
+            "commonsense_pass_rate": round(commonsense_pass_rate, 4),
+            "pass_rate": round(commonsense_pass_rate, 4),
+            "per_case_details": [asdict(result) for result in results],
+        }
+
+    def _run_single_prompt(self, prompt: str) -> str:
+        try:
+            return self.ollama_client.send_chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+        except OllamaServiceError as exc:
+            return f"ERROR: {exc}"
+
+    def _combine_errors(self, existing: str | None, new_error: str | None) -> str | None:
+        if not new_error:
+            return existing
+        if not existing:
+            return new_error
+        return f"{existing} ; {new_error}"
+
+    def _infer_failure_reason(
+        self,
+        direct_answer: str,
+        verified_final_answer: str,
+        direct_pass: bool,
+        commonsense_pass: bool,
+        direct_scoring_error: str | None,
+        commonsense_scoring_error: str | None,
+        parse_error: str | None,
+    ) -> str | None:
+        if direct_pass and commonsense_pass:
+            return None
+
+        if direct_scoring_error or commonsense_scoring_error:
+            problems = [item for item in [direct_scoring_error, commonsense_scoring_error] if item]
+            return " ; ".join(problems)
+
+        if parse_error:
+            return f"Structured commonsense or verification output was malformed: {parse_error}"
+
+        if direct_answer.startswith("ERROR:") or verified_final_answer.startswith("ERROR:"):
+            return "A model call failed during evaluation."
+
+        if direct_pass and not commonsense_pass:
+            return "The commonsense scaffold or verification pass destabilized a previously correct direct answer."
+
+        if (not direct_pass) and (not commonsense_pass):
+            direct_norm = self.scoring_engine.normalize_whitespace(direct_answer).casefold()
+            commonsense_norm = self.scoring_engine.normalize_whitespace(verified_final_answer).casefold()
+            if direct_norm == commonsense_norm:
+                return "The commonsense path did not materially improve the final answer."
+            return "The commonsense path changed the answer, but the verified final answer was still incorrect."
+
+        return None
+
+
 class ScorecardWriter:
     """Write a structured JSON scorecard to disk."""
 
@@ -2014,6 +2568,45 @@ class FailureLogWriter:
                         f"- Expected answer: `{result.expected_answer}`",
                         f"- Direct answer: `{result.direct_answer}`",
                         f"- Verified reasoned final answer: `{result.verified_final_answer}`",
+                        f"- Parse error: {result.parse_error or 'None'}",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+
+    def write_commonsense_log(self, path: str | Path, results: Sequence[CommonSenseCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.commonsense_pass]
+
+        lines: list[str] = [
+            "# Stage 6 Failure Log",
+            "",
+            f"Total failed verified-commonsense cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All verified-commonsense cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Scenario type: {result.scenario_type}",
+                        f"- Expected answer: `{result.expected_answer}`",
+                        f"- Direct answer: `{result.direct_answer}`",
+                        f"- Verified commonsense final answer: `{result.verified_final_answer}`",
                         f"- Parse error: {result.parse_error or 'None'}",
                         f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
                         "",
@@ -2390,6 +2983,109 @@ class Stage5CLIApp(Stage4CLIApp):
         return 0
 
 
+
+class Stage6CLIApp(Stage5CLIApp):
+    """Top-level controller preserving Stages 1-5 and adding Stage 6 modes."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        ollama_client: OllamaChatClient,
+        transfer_case_loader: TransferCaseLoader | None = None,
+        adaptation_case_loader: AdaptationCaseLoader | None = None,
+        fewshot_case_loader: FewShotCaseLoader | None = None,
+        reasoning_case_loader: ReasoningCaseLoader | None = None,
+        commonsense_case_loader: CommonSenseCaseLoader | None = None,
+        scorecard_writer: ScorecardWriter | None = None,
+        failure_log_writer: FailureLogWriter | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            ollama_client=ollama_client,
+            transfer_case_loader=transfer_case_loader,
+            adaptation_case_loader=adaptation_case_loader,
+            fewshot_case_loader=fewshot_case_loader,
+            reasoning_case_loader=reasoning_case_loader,
+            scorecard_writer=scorecard_writer,
+            failure_log_writer=failure_log_writer,
+        )
+        self.commonsense_case_loader = (
+            commonsense_case_loader if commonsense_case_loader is not None else CommonSenseCaseLoader()
+        )
+
+    def run(self) -> int:
+        if self.config.mode in {"commonsense-demo", "commonsense-eval"}:
+            return self._run_commonsense_modes()
+        return super().run()
+
+    def _run_commonsense_modes(self) -> int:
+        try:
+            cases = self.commonsense_case_loader.load(self.config.cases_path, limit=self.config.limit)
+        except Stage6CaseLoadError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        if not cases:
+            print("Error: The common-sense case file loaded successfully but contained no cases.")
+            return 1
+
+        evaluator = CommonSenseEvaluator(
+            ollama_client=self.ollama_client,
+            model=self.config.model,
+            temperature=self.config.temperature,
+        )
+
+        if self.config.mode == "commonsense-demo":
+            return self._run_commonsense_demo(evaluator=evaluator, cases=cases)
+
+        return self._run_commonsense_eval(evaluator=evaluator, cases=cases)
+
+    def _run_commonsense_demo(
+        self,
+        evaluator: CommonSenseEvaluator,
+        cases: Sequence[Stage6CommonSenseCase],
+    ) -> int:
+        print(f"Loaded common-sense cases: {len(cases)}")
+
+        for index, case in enumerate(cases, start=1):
+            result = evaluator.evaluate_case(case)
+            print("-" * 72)
+            print(f"Demo case {index}: {case.case_id}")
+            print(f"Scenario type: {case.scenario_type}")
+            print(f"Direct answer: {result.direct_answer}")
+            print(f"Common-sense grounded answer: {result.commonsense_grounded_answer or 'PARSE FAILED'}")
+            print(f"Verified final answer: {result.verified_final_answer or 'N/A'}")
+            print(f"Expected answer: {case.expected_answer}")
+            print(f"Common-sense grounding helped: {'YES' if result.commonsense_helped else 'NO'}")
+
+        return 0
+
+    def _run_commonsense_eval(
+        self,
+        evaluator: CommonSenseEvaluator,
+        cases: Sequence[Stage6CommonSenseCase],
+    ) -> int:
+        results = evaluator.evaluate_cases(cases)
+        scorecard = evaluator.build_scorecard(results)
+
+        scorecard_path = self.scorecard_writer.write(self.config.scorecard_out, scorecard)
+        failure_log_path = self.failure_log_writer.write_commonsense_log(self.config.failure_log_out, results)
+
+        print("Common-sense evaluation complete.")
+        print(f"Total cases: {scorecard['total_cases']}")
+        print(f"Direct passes: {scorecard['direct_pass_count']}")
+        print(f"Verified commonsense passes: {scorecard['commonsense_pass_count']}")
+        print(f"Common-sense improvements: {scorecard['commonsense_improvement_count']}")
+        print(f"Regressions: {scorecard['regression_count']}")
+        print(f"Parse errors: {scorecard['parse_error_count']}")
+        print(f"Direct pass rate: {scorecard['direct_pass_rate']:.2%}")
+        print(f"Verified commonsense pass rate: {scorecard['commonsense_pass_rate']:.2%}")
+        print(f"Scorecard written to: {scorecard_path}")
+        print(f"Failure log written to: {failure_log_path}")
+
+        return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     config = ConfigResolver.resolve(argv=argv)
 
@@ -2411,7 +3107,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: {error_message}")
         return 1
 
-    app = Stage5CLIApp(config=config, ollama_client=ollama_client)
+    app = Stage6CLIApp(config=config, ollama_client=ollama_client)
     return app.run()
 
 
