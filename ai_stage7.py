@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 """
-Stage 6 local AI assistant.
+Stage 7 local AI assistant.
 
 This file preserves the Stage 1 chat loop, the Stage 2 transfer-learning
-benchmark, the Stage 3 rapid-adaptation benchmark, and the Stage 4 few-shot /
-zero-shot benchmark, then adds a bounded, inspectable Stage 5 robust
-reasoning mode and a separate Stage 6 common-sense understanding mode.
+benchmark, the Stage 3 rapid-adaptation benchmark, the Stage 4 few-shot /
+zero-shot benchmark, the Stage 5 robust reasoning mode, and the Stage 6
+common-sense understanding mode, then adds a bounded, inspectable Stage 7
+abstract-thinking mode.
 
 Important honesty boundary:
 - This is not model training.
@@ -18,7 +19,9 @@ Important honesty boundary:
 - This is not Stage 11 subgoal decomposition.
 - This is not model training or persistent learning.
 - Stage 6 is a bounded common-sense benchmark about everyday implied facts.
-- It does not claim world modeling, social intelligence, or hidden long-term learning.
+- Stage 7 is a bounded abstract-thinking benchmark about concept structure, analogy,
+  hierarchy, symbolic mapping, and abstraction over surface form.
+- It does not claim world modeling, persistent learning, causal reasoning, or open-ended conceptual mastery.
 """
 
 import argparse
@@ -42,7 +45,7 @@ else:
     OLLAMA_IMPORT_ERROR = None
 
 
-APP_NAME = "Local AI Assistant - Stage 6"
+APP_NAME = "Local AI Assistant - Stage 7"
 DEFAULT_MODEL = "gemma3:latest"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TEMPERATURE = 0.2
@@ -52,16 +55,19 @@ DEFAULT_STAGE3_CASES_PATH = "stage3_adaptation_cases.json"
 DEFAULT_STAGE4_CASES_PATH = "stage4_fewshot_cases.json"
 DEFAULT_STAGE5_CASES_PATH = "stage5_reasoning_cases.json"
 DEFAULT_STAGE6_CASES_PATH = "stage6_commonsense_cases.json"
+DEFAULT_STAGE7_CASES_PATH = "stage7_abstract_cases.json"
 DEFAULT_STAGE2_SCORECARD_PATH = "stage2_scorecard.json"
 DEFAULT_STAGE3_SCORECARD_PATH = "stage3_scorecard.json"
 DEFAULT_STAGE4_SCORECARD_PATH = "stage4_scorecard.json"
 DEFAULT_STAGE5_SCORECARD_PATH = "stage5_scorecard.json"
 DEFAULT_STAGE6_SCORECARD_PATH = "stage6_scorecard.json"
+DEFAULT_STAGE7_SCORECARD_PATH = "stage7_scorecard.json"
 DEFAULT_STAGE2_FAILURE_LOG_PATH = "failure_log_stage2.md"
 DEFAULT_STAGE3_FAILURE_LOG_PATH = "failure_log_stage3.md"
 DEFAULT_STAGE4_FAILURE_LOG_PATH = "failure_log_stage4.md"
 DEFAULT_STAGE5_FAILURE_LOG_PATH = "failure_log_stage5.md"
 DEFAULT_STAGE6_FAILURE_LOG_PATH = "failure_log_stage6.md"
+DEFAULT_STAGE7_FAILURE_LOG_PATH = "failure_log_stage7.md"
 
 HELP_TEXT = """Available commands:
   /help   Show this help message
@@ -80,6 +86,8 @@ SUPPORTED_MODES = [
     "reason-eval",
     "commonsense-demo",
     "commonsense-eval",
+    "abstract-demo",
+    "abstract-eval",
 ]
 
 ALLOWED_ADAPTATION_TYPES = {
@@ -101,6 +109,7 @@ ALLOWED_REASONING_SCORING_TYPES = {
 }
 
 ALLOWED_COMMONSENSE_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
+ALLOWED_ABSTRACT_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
 
 
 def read_json_payload(path: str | Path, label: str) -> Any:
@@ -155,7 +164,7 @@ class ConfigResolver:
             description=(
                 "Run the Stage 6 local AI assistant against a local Ollama model. "
                 "Modes: chat, transfer-demo, transfer-eval, adapt-demo, adapt-eval, "
-                "fewshot-demo, fewshot-eval, reason-demo, reason-eval, commonsense-demo, commonsense-eval."
+                "fewshot-demo, fewshot-eval, reason-demo, reason-eval, commonsense-demo, commonsense-eval, abstract-demo, abstract-eval."
             )
         )
         parser.add_argument(
@@ -163,7 +172,7 @@ class ConfigResolver:
             dest="mode",
             choices=SUPPORTED_MODES,
             default=DEFAULT_MODE,
-            help="Run normal chat, Stage 2 transfer modes, Stage 3 adaptation modes, Stage 4 few-shot modes, Stage 5 reasoning modes, or Stage 6 commonsense modes.",
+            help="Run normal chat, Stage 2 transfer modes, Stage 3 adaptation modes, Stage 4 few-shot modes, Stage 5 reasoning modes, Stage 6 commonsense modes, or Stage 7 abstract-thinking modes.",
         )
         parser.add_argument(
             "--model",
@@ -235,6 +244,8 @@ class ConfigResolver:
             return DEFAULT_STAGE5_CASES_PATH
         if mode in {"commonsense-demo", "commonsense-eval"}:
             return DEFAULT_STAGE6_CASES_PATH
+        if mode in {"abstract-demo", "abstract-eval"}:
+            return DEFAULT_STAGE7_CASES_PATH
         return DEFAULT_STAGE2_CASES_PATH
 
     @staticmethod
@@ -247,6 +258,8 @@ class ConfigResolver:
             return DEFAULT_STAGE5_SCORECARD_PATH
         if mode in {"commonsense-demo", "commonsense-eval"}:
             return DEFAULT_STAGE6_SCORECARD_PATH
+        if mode in {"abstract-demo", "abstract-eval"}:
+            return DEFAULT_STAGE7_SCORECARD_PATH
         return DEFAULT_STAGE2_SCORECARD_PATH
 
     @staticmethod
@@ -259,6 +272,8 @@ class ConfigResolver:
             return DEFAULT_STAGE5_FAILURE_LOG_PATH
         if mode in {"commonsense-demo", "commonsense-eval"}:
             return DEFAULT_STAGE6_FAILURE_LOG_PATH
+        if mode in {"abstract-demo", "abstract-eval"}:
+            return DEFAULT_STAGE7_FAILURE_LOG_PATH
         return DEFAULT_STAGE2_FAILURE_LOG_PATH
 
 
@@ -2617,6 +2632,45 @@ class FailureLogWriter:
         return output_path
 
 
+    def write_abstract_log(self, path: str | Path, results: Sequence[AbstractCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.abstract_pass]
+
+        lines: list[str] = [
+            "# Stage 7 Failure Log",
+            "",
+            f"Total failed verified-abstract cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All verified-abstract cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Task family: {result.task_family}",
+                        f"- Expected answer: `{result.expected_answer}`",
+                        f"- Direct answer: `{result.direct_answer}`",
+                        f"- Verified abstract final answer: `{result.verified_final_answer}`",
+                        f"- Parse error: {result.parse_error or 'None'}",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+
 class Stage3CLIApp:
     """Top-level controller preserving Stage 1/2 and adding Stage 3 modes."""
 
@@ -3086,6 +3140,628 @@ class Stage6CLIApp(Stage5CLIApp):
         return 0
 
 
+
+class Stage7CaseLoadError(Exception):
+    """Raised when the abstract-thinking case file cannot be loaded safely."""
+
+
+ALLOWED_ABSTRACT_TASK_FAMILIES = {
+    "analogy completion",
+    "relational mapping",
+    "category abstraction",
+    "hierarchy inference",
+    "symbolic structure mapping",
+    "pattern abstraction across changed surface forms",
+    "abstract grouping / odd-one-out by concept rather than surface form",
+    "concept-to-instance / instance-to-concept mapping",
+    "structural analogy across domains",
+    "simple metaphor-like relational abstraction without requiring literary interpretation",
+}
+
+
+@dataclass(frozen=True)
+class Stage7AbstractCase:
+    """One curated Stage 7 abstract-thinking case."""
+
+    case_id: str
+    task_family: str
+    task_text: str
+    expected_answer: str
+    scoring_type: str
+    abstraction_focus: str
+    novelty_notes: str
+    notes: str
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "Stage7AbstractCase":
+        required_fields = [
+            "case_id",
+            "task_family",
+            "task_text",
+            "expected_answer",
+            "scoring_type",
+            "abstraction_focus",
+            "novelty_notes",
+            "notes",
+        ]
+        missing = [field_name for field_name in required_fields if field_name not in mapping]
+        if missing:
+            raise Stage7CaseLoadError(
+                "Abstract-thinking case is missing required field(s): " + ", ".join(missing)
+            )
+
+        values: dict[str, str] = {}
+        for field_name in required_fields:
+            values[field_name] = require_non_empty_string(
+                mapping=mapping,
+                field_name=field_name,
+                error_type=Stage7CaseLoadError,
+                object_label="Abstract-thinking case",
+            )
+
+        task_family_key = values["task_family"].strip().lower()
+        if task_family_key not in ALLOWED_ABSTRACT_TASK_FAMILIES:
+            allowed = ", ".join(sorted(ALLOWED_ABSTRACT_TASK_FAMILIES))
+            raise Stage7CaseLoadError(
+                f"Unsupported task_family '{values['task_family']}'. Allowed values: {allowed}."
+            )
+
+        scoring_key = " ".join(values["scoring_type"].strip().lower().replace("_", " ").split())
+        if scoring_key not in ALLOWED_ABSTRACT_SCORING_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_ABSTRACT_SCORING_TYPES))
+            raise Stage7CaseLoadError(
+                f"Unsupported Stage 7 scoring_type '{values['scoring_type']}'. Allowed values: {allowed}."
+            )
+
+        return cls(**values)
+
+
+class AbstractCaseLoader:
+    """Load and validate the Stage 7 abstract-thinking benchmark cases."""
+
+    def load(self, path: str, limit: int | None = None) -> list[Stage7AbstractCase]:
+        case_path = Path(path)
+        if not case_path.exists():
+            raise Stage7CaseLoadError(f"Abstract-thinking case file was not found: {case_path}")
+
+        try:
+            payload = read_json_payload(case_path, "abstract-thinking case")
+        except ValueError as exc:
+            raise Stage7CaseLoadError(str(exc)) from exc
+
+        if isinstance(payload, dict) and "cases" in payload:
+            payload = payload["cases"]
+
+        if not isinstance(payload, list):
+            raise Stage7CaseLoadError(
+                "Abstract-thinking case file must contain a JSON list of case objects "
+                "or an object with a 'cases' list."
+            )
+
+        cases: list[Stage7AbstractCase] = []
+        seen_case_ids: set[str] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise Stage7CaseLoadError(
+                    "Each abstract-thinking case must be a JSON object with the required fields."
+                )
+
+            case = Stage7AbstractCase.from_mapping(item)
+            if case.case_id in seen_case_ids:
+                raise Stage7CaseLoadError(f"Duplicate case_id found: {case.case_id}")
+            seen_case_ids.add(case.case_id)
+            cases.append(case)
+
+        return cases[:limit] if limit is not None else cases
+
+
+@dataclass(frozen=True)
+class AbstractArtifact:
+    """Compact abstract artifact requested from the model."""
+
+    surface_items: list[str]
+    abstract_pattern: str
+    relation_or_hierarchy: str
+    mapped_target: str
+    tentative_answer: str
+    final_answer: str
+
+
+@dataclass(frozen=True)
+class AbstractVerificationArtifact:
+    """Compact verification artifact produced in the bounded Stage 7 verification pass."""
+
+    verification_note: str
+    verified_final_answer: str
+
+
+class AbstractPromptBuilder:
+    """Build explicit direct, structured, and verification prompts for Stage 7."""
+
+    def build_direct_prompt(self, case: Stage7AbstractCase) -> str:
+        return (
+            "You are being evaluated on a bounded Stage 7 abstract-thinking benchmark.\n"
+            "This is the direct-answer baseline condition.\n"
+            "Answer the task directly, with no explicit abstraction scaffold.\n"
+            "Return only the final answer. Do not explain your reasoning.\n\n"
+            "=== TASK FAMILY ===\n"
+            f"{case.task_family}\n\n"
+            "=== TASK ===\n"
+            f"{case.task_text}\n\n"
+            "=== FINAL ANSWER ==="
+        )
+
+    def build_abstract_prompt(self, case: Stage7AbstractCase) -> str:
+        return (
+            "You are being evaluated on a bounded Stage 7 abstract-thinking benchmark.\n"
+            "This is the abstract-structure condition.\n"
+            "Return JSON only. Do not use markdown fences.\n"
+            "Do not provide hidden chain-of-thought or long essays.\n"
+            "Fill this exact schema with brief values:\n"
+            "{\n"
+            '  "surface_items": ["item 1", "item 2"],\n'
+            '  "abstract_pattern": "brief concept, analogy, hierarchy, or symbolic pattern",\n'
+            '  "relation_or_hierarchy": "brief explicit mapping or hierarchy statement",\n'
+            '  "mapped_target": "target-side mapping or predicted structural match",\n'
+            '  "tentative_answer": "candidate answer",\n'
+            '  "final_answer": "best current final answer"\n'
+            "}\n"
+            "Requirements:\n"
+            "- surface_items must contain 1 to 6 short concrete terms or symbols from the task.\n"
+            "- Keep every field compact and inspectable.\n"
+            "- final_answer must contain the answer you currently endorse.\n\n"
+            "=== TASK FAMILY ===\n"
+            f"{case.task_family}\n\n"
+            "=== ABSTRACTION FOCUS ===\n"
+            f"{case.abstraction_focus}\n\n"
+            "=== TASK ===\n"
+            f"{case.task_text}"
+        )
+
+    def build_verification_prompt(
+        self,
+        case: Stage7AbstractCase,
+        artifact: AbstractArtifact,
+    ) -> str:
+        artifact_json = json.dumps(asdict(artifact), ensure_ascii=False, indent=2)
+        return (
+            "You are being evaluated on a bounded Stage 7 abstract-thinking benchmark.\n"
+            "This is the verification condition.\n"
+            "Check whether the candidate abstract artifact actually fits the task.\n"
+            "Return JSON only. Do not use markdown fences.\n"
+            "Return this exact schema:\n"
+            "{\n"
+            '  "verification_note": "brief note about whether the candidate abstraction fits",\n'
+            '  "verified_final_answer": "the final answer to use for scoring"\n'
+            "}\n"
+            "If the candidate final answer is wrong, correct it.\n"
+            "Keep the note brief and use the verified_final_answer field for the answer itself.\n\n"
+            "=== TASK FAMILY ===\n"
+            f"{case.task_family}\n\n"
+            "=== TASK ===\n"
+            f"{case.task_text}\n\n"
+            "=== CANDIDATE ABSTRACT ARTIFACT ===\n"
+            f"{artifact_json}"
+        )
+
+
+class AbstractOutputParser:
+    """Safely parse the structured Stage 7 abstract outputs."""
+
+    def parse_abstract_artifact(
+        self,
+        raw_output: str,
+    ) -> tuple[AbstractArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Abstract output must be a JSON object."
+
+        required_keys = {
+            "surface_items",
+            "abstract_pattern",
+            "relation_or_hierarchy",
+            "mapped_target",
+            "tentative_answer",
+            "final_answer",
+        }
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Abstract output is missing required key(s): " + ", ".join(sorted(missing))
+
+        surface_items = payload.get("surface_items")
+        if not isinstance(surface_items, list) or not surface_items:
+            return None, "Abstract output field 'surface_items' must be a non-empty JSON list."
+
+        normalized_items: list[str] = []
+        for item in surface_items:
+            if not isinstance(item, str) or not item.strip():
+                return None, "Each surface item must be a non-empty string."
+            normalized_items.append(item.strip())
+
+        if len(normalized_items) > 6:
+            return None, "Abstract output field 'surface_items' must contain at most 6 items."
+
+        string_fields = {
+            "abstract_pattern": payload.get("abstract_pattern"),
+            "relation_or_hierarchy": payload.get("relation_or_hierarchy"),
+            "mapped_target": payload.get("mapped_target"),
+            "tentative_answer": payload.get("tentative_answer"),
+            "final_answer": payload.get("final_answer"),
+        }
+        for key, value in string_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                return None, f"Abstract output field '{key}' must be a non-empty string."
+
+        return (
+            AbstractArtifact(
+                surface_items=normalized_items,
+                abstract_pattern=string_fields["abstract_pattern"].strip(),
+                relation_or_hierarchy=string_fields["relation_or_hierarchy"].strip(),
+                mapped_target=string_fields["mapped_target"].strip(),
+                tentative_answer=string_fields["tentative_answer"].strip(),
+                final_answer=string_fields["final_answer"].strip(),
+            ),
+            None,
+        )
+
+    def parse_verification_output(
+        self,
+        raw_output: str,
+    ) -> tuple[AbstractVerificationArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Verification output must be a JSON object."
+
+        required_keys = {"verification_note", "verified_final_answer"}
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Verification output is missing required key(s): " + ", ".join(sorted(missing))
+
+        verification_note = payload.get("verification_note")
+        verified_final_answer = payload.get("verified_final_answer")
+
+        if not isinstance(verification_note, str) or not verification_note.strip():
+            return None, "Verification output field 'verification_note' must be a non-empty string."
+        if not isinstance(verified_final_answer, str) or not verified_final_answer.strip():
+            return None, "Verification output field 'verified_final_answer' must be a non-empty string."
+
+        return (
+            AbstractVerificationArtifact(
+                verification_note=verification_note.strip(),
+                verified_final_answer=verified_final_answer.strip(),
+            ),
+            None,
+        )
+
+    def _extract_first_json_object(self, raw_output: str) -> Any:
+        text = raw_output.strip()
+        if not text:
+            raise ValueError("Model returned an empty structured output.")
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                payload, _end = decoder.raw_decode(text[index:])
+                return payload
+            except json.JSONDecodeError:
+                continue
+
+        raise ValueError("Could not find a valid JSON object in the model output.")
+
+
+@dataclass
+class AbstractCaseResult:
+    """Structured result for one Stage 7 abstract-thinking case."""
+
+    case_id: str
+    task_family: str
+    scoring_type: str
+    expected_answer: str
+    direct_answer: str
+    abstract_raw_output: str
+    parsed_abstract_artifact: dict[str, Any] | None
+    verified_final_answer: str
+    direct_pass: bool
+    abstract_pass: bool
+    abstract_helped: bool
+    regression: bool
+    direct_scoring_error: str | None = None
+    abstract_scoring_error: str | None = None
+    parse_error: str | None = None
+    probable_failure_reason: str | None = None
+    verification_raw_output: str | None = None
+    verification_note: str | None = None
+    abstract_grounded_answer: str | None = None
+
+
+class AbstractEvaluator:
+    """Run direct-answer versus structured-and-verified abstraction for Stage 7."""
+
+    def __init__(
+        self,
+        ollama_client: OllamaChatClient,
+        model: str,
+        temperature: float,
+        prompt_builder: AbstractPromptBuilder | None = None,
+        output_parser: AbstractOutputParser | None = None,
+        scoring_engine: ScoringEngine | None = None,
+    ) -> None:
+        self.ollama_client = ollama_client
+        self.model = model
+        self.temperature = temperature
+        self.prompt_builder = prompt_builder if prompt_builder is not None else AbstractPromptBuilder()
+        self.output_parser = output_parser if output_parser is not None else AbstractOutputParser()
+        self.scoring_engine = scoring_engine if scoring_engine is not None else ScoringEngine()
+
+    def evaluate_case(self, case: Stage7AbstractCase) -> AbstractCaseResult:
+        direct_answer = self._run_single_prompt(self.prompt_builder.build_direct_prompt(case))
+        abstract_raw_output = self._run_single_prompt(self.prompt_builder.build_abstract_prompt(case))
+
+        parsed_artifact, parse_error = self.output_parser.parse_abstract_artifact(abstract_raw_output)
+        abstract_grounded_answer = parsed_artifact.final_answer if parsed_artifact is not None else None
+
+        verification_raw_output: str | None = None
+        verification_note: str | None = None
+        verified_final_answer = ""
+
+        if parsed_artifact is not None:
+            verification_raw_output = self._run_single_prompt(
+                self.prompt_builder.build_verification_prompt(case, parsed_artifact)
+            )
+            parsed_verification, verification_parse_error = self.output_parser.parse_verification_output(
+                verification_raw_output
+            )
+
+            if verification_parse_error:
+                parse_error = self._combine_errors(parse_error, verification_parse_error)
+                verification_note = (
+                    "Verification output could not be parsed cleanly; using abstract-grounded final answer."
+                )
+                verified_final_answer = parsed_artifact.final_answer
+            else:
+                assert parsed_verification is not None
+                verification_note = parsed_verification.verification_note
+                verified_final_answer = parsed_verification.verified_final_answer
+        else:
+            verification_note = None
+            verified_final_answer = ""
+
+        direct_pass, direct_scoring_error = self.scoring_engine.score_answer(
+            answer=direct_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+        abstract_pass, abstract_scoring_error = self.scoring_engine.score_answer(
+            answer=verified_final_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+
+        abstract_helped = (not direct_pass) and abstract_pass
+        regression = direct_pass and (not abstract_pass)
+
+        probable_failure_reason = self._infer_failure_reason(
+            direct_answer=direct_answer,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            abstract_pass=abstract_pass,
+            direct_scoring_error=direct_scoring_error,
+            abstract_scoring_error=abstract_scoring_error,
+            parse_error=parse_error,
+        )
+
+        return AbstractCaseResult(
+            case_id=case.case_id,
+            task_family=case.task_family,
+            scoring_type=case.scoring_type,
+            expected_answer=case.expected_answer,
+            direct_answer=direct_answer,
+            abstract_raw_output=abstract_raw_output,
+            parsed_abstract_artifact=asdict(parsed_artifact) if parsed_artifact is not None else None,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            abstract_pass=abstract_pass,
+            abstract_helped=abstract_helped,
+            regression=regression,
+            direct_scoring_error=direct_scoring_error,
+            abstract_scoring_error=abstract_scoring_error,
+            parse_error=parse_error,
+            probable_failure_reason=probable_failure_reason,
+            verification_raw_output=verification_raw_output,
+            verification_note=verification_note,
+            abstract_grounded_answer=abstract_grounded_answer,
+        )
+
+    def evaluate_cases(self, cases: Sequence[Stage7AbstractCase]) -> list[AbstractCaseResult]:
+        return [self.evaluate_case(case) for case in cases]
+
+    def build_scorecard(self, results: Sequence[AbstractCaseResult]) -> dict[str, Any]:
+        total_cases = len(results)
+        direct_pass_count = sum(result.direct_pass for result in results)
+        abstract_pass_count = sum(result.abstract_pass for result in results)
+        abstract_improvement_count = sum(result.abstract_helped for result in results)
+        regression_count = sum(result.regression for result in results)
+        parse_error_count = sum(1 for result in results if result.parse_error)
+
+        direct_pass_rate = (direct_pass_count / total_cases) if total_cases else 0.0
+        abstract_pass_rate = (abstract_pass_count / total_cases) if total_cases else 0.0
+
+        return {
+            "total_cases": total_cases,
+            "direct_pass_count": direct_pass_count,
+            "abstract_pass_count": abstract_pass_count,
+            "abstract_improvement_count": abstract_improvement_count,
+            "regression_count": regression_count,
+            "parse_error_count": parse_error_count,
+            "direct_pass_rate": round(direct_pass_rate, 4),
+            "abstract_pass_rate": round(abstract_pass_rate, 4),
+            "per_case_details": [asdict(result) for result in results],
+        }
+
+    def _run_single_prompt(self, prompt: str) -> str:
+        try:
+            return self.ollama_client.send_chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+        except OllamaServiceError as exc:
+            return f"ERROR: {exc}"
+
+    def _combine_errors(self, existing: str | None, new_error: str | None) -> str | None:
+        if not new_error:
+            return existing
+        if not existing:
+            return new_error
+        return f"{existing} ; {new_error}"
+
+    def _infer_failure_reason(
+        self,
+        direct_answer: str,
+        verified_final_answer: str,
+        direct_pass: bool,
+        abstract_pass: bool,
+        direct_scoring_error: str | None,
+        abstract_scoring_error: str | None,
+        parse_error: str | None,
+    ) -> str | None:
+        if direct_pass and abstract_pass:
+            return None
+
+        if direct_scoring_error or abstract_scoring_error:
+            problems = [item for item in [direct_scoring_error, abstract_scoring_error] if item]
+            return " ; ".join(problems)
+
+        if parse_error:
+            return f"Structured abstraction or verification output was malformed: {parse_error}"
+
+        if direct_answer.startswith("ERROR:") or verified_final_answer.startswith("ERROR:"):
+            return "A model call failed during evaluation."
+
+        if direct_pass and not abstract_pass:
+            return "The abstraction scaffold or verification pass destabilized a previously correct direct answer."
+
+        if (not direct_pass) and (not abstract_pass):
+            direct_norm = self.scoring_engine.normalize_whitespace(direct_answer).casefold()
+            abstract_norm = self.scoring_engine.normalize_whitespace(verified_final_answer).casefold()
+            if direct_norm == abstract_norm:
+                return "The abstract-structure path did not materially improve the final answer."
+            return "The abstract-structure path changed the answer, but the verified final answer was still incorrect."
+
+        return None
+
+
+class Stage7CLIApp(Stage6CLIApp):
+    """Top-level controller preserving Stages 1-6 and adding Stage 7 modes."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        ollama_client: OllamaChatClient,
+        transfer_case_loader: TransferCaseLoader | None = None,
+        adaptation_case_loader: AdaptationCaseLoader | None = None,
+        fewshot_case_loader: FewShotCaseLoader | None = None,
+        reasoning_case_loader: ReasoningCaseLoader | None = None,
+        commonsense_case_loader: CommonSenseCaseLoader | None = None,
+        abstract_case_loader: AbstractCaseLoader | None = None,
+        scorecard_writer: ScorecardWriter | None = None,
+        failure_log_writer: FailureLogWriter | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            ollama_client=ollama_client,
+            transfer_case_loader=transfer_case_loader,
+            adaptation_case_loader=adaptation_case_loader,
+            fewshot_case_loader=fewshot_case_loader,
+            reasoning_case_loader=reasoning_case_loader,
+            commonsense_case_loader=commonsense_case_loader,
+            scorecard_writer=scorecard_writer,
+            failure_log_writer=failure_log_writer,
+        )
+        self.abstract_case_loader = abstract_case_loader if abstract_case_loader is not None else AbstractCaseLoader()
+
+    def run(self) -> int:
+        if self.config.mode in {"abstract-demo", "abstract-eval"}:
+            return self._run_abstract_modes()
+        return super().run()
+
+    def _run_abstract_modes(self) -> int:
+        try:
+            cases = self.abstract_case_loader.load(self.config.cases_path, limit=self.config.limit)
+        except Stage7CaseLoadError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        if not cases:
+            print("Error: The abstract-thinking case file loaded successfully but contained no cases.")
+            return 1
+
+        evaluator = AbstractEvaluator(
+            ollama_client=self.ollama_client,
+            model=self.config.model,
+            temperature=self.config.temperature,
+        )
+
+        if self.config.mode == "abstract-demo":
+            return self._run_abstract_demo(evaluator=evaluator, cases=cases)
+
+        return self._run_abstract_eval(evaluator=evaluator, cases=cases)
+
+    def _run_abstract_demo(
+        self,
+        evaluator: AbstractEvaluator,
+        cases: Sequence[Stage7AbstractCase],
+    ) -> int:
+        print(f"Loaded abstract-thinking cases: {len(cases)}")
+
+        for index, case in enumerate(cases, start=1):
+            result = evaluator.evaluate_case(case)
+            print("-" * 72)
+            print(f"Demo case {index}: {case.case_id}")
+            print(f"Task family: {case.task_family}")
+            print(f"Direct answer: {result.direct_answer}")
+            print(f"Abstract-grounded answer: {result.abstract_grounded_answer or 'PARSE FAILED'}")
+            print(f"Verified final answer: {result.verified_final_answer or 'N/A'}")
+            print(f"Expected answer: {case.expected_answer}")
+            print(f"Abstract representation helped: {'YES' if result.abstract_helped else 'NO'}")
+
+        return 0
+
+    def _run_abstract_eval(
+        self,
+        evaluator: AbstractEvaluator,
+        cases: Sequence[Stage7AbstractCase],
+    ) -> int:
+        results = evaluator.evaluate_cases(cases)
+        scorecard = evaluator.build_scorecard(results)
+
+        scorecard_path = self.scorecard_writer.write(self.config.scorecard_out, scorecard)
+        failure_log_path = self.failure_log_writer.write_abstract_log(self.config.failure_log_out, results)
+
+        print("Abstract-thinking evaluation complete.")
+        print(f"Total cases: {scorecard['total_cases']}")
+        print(f"Direct passes: {scorecard['direct_pass_count']}")
+        print(f"Verified abstract passes: {scorecard['abstract_pass_count']}")
+        print(f"Abstract improvements: {scorecard['abstract_improvement_count']}")
+        print(f"Regressions: {scorecard['regression_count']}")
+        print(f"Parse errors: {scorecard['parse_error_count']}")
+        print(f"Direct pass rate: {scorecard['direct_pass_rate']:.2%}")
+        print(f"Verified abstract pass rate: {scorecard['abstract_pass_rate']:.2%}")
+        print(f"Scorecard written to: {scorecard_path}")
+        print(f"Failure log written to: {failure_log_path}")
+
+        return 0
+
 def main(argv: Sequence[str] | None = None) -> int:
     config = ConfigResolver.resolve(argv=argv)
 
@@ -3107,7 +3783,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: {error_message}")
         return 1
 
-    app = Stage6CLIApp(config=config, ollama_client=ollama_client)
+    app = Stage7CLIApp(config=config, ollama_client=ollama_client)
     return app.run()
 
 
