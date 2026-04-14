@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 """
-Stage 9 local AI assistant.
+Stage 10 local AI assistant.
 
 This file preserves the Stage 1 chat loop, the Stage 2 transfer-learning
 benchmark, the Stage 3 rapid-adaptation benchmark, the Stage 4 few-shot /
@@ -10,15 +10,16 @@ zero-shot benchmark, the Stage 5 robust reasoning mode, and the Stage 6
 common-sense understanding mode, then adds a bounded, inspectable Stage 7
 abstract-thinking mode, then extends it with a bounded, inspectable
 Stage 8 causal-reasoning mode, then extends it with a bounded, inspectable
-Stage 9 long-horizon planning mode.
+Stage 9 long-horizon planning mode, then extends it with a bounded,
+inspectable Stage 10 goal-directed-behavior mode.
 
 Important honesty boundary:
 - This is not model training.
 - This is not persistent learning across runs.
 - This is not hidden long-term learning.
 - This is not Stage 4 few-shot / zero-shot competence.
-- This is not Stage 10 goal-directed behavior.
 - This is not Stage 11 subgoal decomposition.
+- This is not Stage 31 autonomy.
 - This is not model training or persistent learning.
 - Stage 6 is a bounded common-sense benchmark about everyday implied facts.
 - Stage 7 is a bounded abstract-thinking benchmark about concept structure, analogy,
@@ -26,6 +27,7 @@ Important honesty boundary:
 - Stage 7 does not claim world modeling, persistent learning, causal reasoning, or open-ended conceptual mastery.
 - Stage 8 is a bounded causal-reasoning benchmark about cause versus correlation, interventions, counterfactuals, simple causal chains, mediators, and confounders in toy tasks.
 - Stage 9 is a bounded long-horizon planning benchmark about explicit multi-step future sequencing, dependencies, ordering constraints, simple state progression, and inspectable plan viability in toy tasks.
+- Stage 10 is a bounded goal-directed benchmark about explicit objective optimization, candidate action comparison, tradeoff handling, and selecting the action or short action sequence that best continues objective achievement in toy task worlds.
 - It does not claim full causal modeling, world modeling, persistent learning, open-ended scientific reasoning, autonomy, or agentic task execution.
 """
 
@@ -50,7 +52,7 @@ else:
     OLLAMA_IMPORT_ERROR = None
 
 
-APP_NAME = "Local AI Assistant - Stage 9"
+APP_NAME = "Local AI Assistant - Stage 10"
 DEFAULT_MODEL = "gemma3:latest"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TEMPERATURE = 0.2
@@ -5341,6 +5343,1166 @@ class Stage9CLIApp(Stage8CLIApp):
         return 0
 
 
+
+DEFAULT_STAGE10_CASES_PATH = "stage10_goal_cases.json"
+DEFAULT_STAGE10_SCORECARD_PATH = "stage10_scorecard.json"
+DEFAULT_STAGE10_FAILURE_LOG_PATH = "failure_log_stage10.md"
+SUPPORTED_MODES = SUPPORTED_MODES + ["goal-demo", "goal-eval"]
+ALLOWED_GOAL_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
+
+
+BaseConfigResolver = ConfigResolver
+
+
+class Stage10ConfigResolver(BaseConfigResolver):
+    """Resolve configuration for the Stage 10 runtime."""
+
+    @staticmethod
+    def build_parser() -> argparse.ArgumentParser:
+        parser = argparse.ArgumentParser(
+            description=(
+                "Run the Stage 10 local AI assistant against a local Ollama model. "
+                "Modes: chat, transfer-demo, transfer-eval, adapt-demo, adapt-eval, "
+                "fewshot-demo, fewshot-eval, reason-demo, reason-eval, commonsense-demo, "
+                "commonsense-eval, abstract-demo, abstract-eval, causal-demo, causal-eval, "
+                "planning-demo, planning-eval, goal-demo, goal-eval."
+            )
+        )
+        parser.add_argument(
+            "--mode",
+            dest="mode",
+            choices=SUPPORTED_MODES,
+            default=DEFAULT_MODE,
+            help=(
+                "Run normal chat, Stage 2 transfer modes, Stage 3 adaptation modes, "
+                "Stage 4 few-shot modes, Stage 5 reasoning modes, Stage 6 commonsense modes, "
+                "Stage 7 abstract-thinking modes, Stage 8 causal-reasoning modes, "
+                "Stage 9 long-horizon planning modes, or Stage 10 goal-directed modes."
+            ),
+        )
+        parser.add_argument(
+            "--model",
+            dest="model",
+            help="Override the Ollama model name for this run.",
+        )
+        parser.add_argument(
+            "--cases",
+            dest="cases_path",
+            help="Path to the active benchmark case file.",
+        )
+        parser.add_argument(
+            "--limit",
+            dest="limit",
+            type=int,
+            help="Limit the number of benchmark cases to run.",
+        )
+        parser.add_argument(
+            "--scorecard-out",
+            dest="scorecard_out",
+            help="Path to write the scorecard JSON file.",
+        )
+        parser.add_argument(
+            "--failure-log-out",
+            dest="failure_log_out",
+            help="Path to write the markdown failure log.",
+        )
+        return parser
+
+    @classmethod
+    def resolve(
+        cls,
+        argv: Sequence[str] | None = None,
+        env: Mapping[str, str] | None = None,
+    ) -> AppConfig:
+        parser = cls.build_parser()
+        args = parser.parse_args(list(argv) if argv is not None else None)
+
+        env_map = env if env is not None else os.environ
+        cli_model = (args.model or "").strip()
+        env_model = env_map.get("OLLAMA_MODEL", "").strip()
+
+        if cli_model:
+            selected_model = cli_model
+        elif env_model:
+            selected_model = env_model
+        else:
+            selected_model = DEFAULT_MODEL
+
+        if args.limit is not None and args.limit <= 0:
+            parser.error("--limit must be a positive integer when provided.")
+
+        return AppConfig(
+            model=selected_model,
+            mode=args.mode,
+            cases_path=(args.cases_path or cls._resolve_default_cases_path(args.mode)),
+            scorecard_out=(args.scorecard_out or cls._resolve_default_scorecard_out(args.mode)),
+            failure_log_out=(args.failure_log_out or cls._resolve_default_failure_log_out(args.mode)),
+            limit=args.limit,
+        )
+
+    @staticmethod
+    def _resolve_default_cases_path(mode: str) -> str:
+        if mode in {"goal-demo", "goal-eval"}:
+            return DEFAULT_STAGE10_CASES_PATH
+        return BaseConfigResolver._resolve_default_cases_path(mode)
+
+    @staticmethod
+    def _resolve_default_scorecard_out(mode: str) -> str:
+        if mode in {"goal-demo", "goal-eval"}:
+            return DEFAULT_STAGE10_SCORECARD_PATH
+        return BaseConfigResolver._resolve_default_scorecard_out(mode)
+
+    @staticmethod
+    def _resolve_default_failure_log_out(mode: str) -> str:
+        if mode in {"goal-demo", "goal-eval"}:
+            return DEFAULT_STAGE10_FAILURE_LOG_PATH
+        return BaseConfigResolver._resolve_default_failure_log_out(mode)
+
+
+ConfigResolver = Stage10ConfigResolver
+
+
+class Stage10CaseLoadError(Exception):
+    """Raised when the goal-directed case file cannot be loaded safely."""
+
+
+ALLOWED_GOAL_TASK_FAMILIES = {
+    "bounded reward-maximization",
+    "budget-constrained action choice",
+    "penalty-avoidance decision selection",
+    "resource-allocation toward a stated objective",
+    "short policy selection in a toy environment",
+    "choose-next-best-action tasks",
+    "value-preserving sequence choice",
+    "synthetic utility-optimization tasks",
+    "bounded exploration vs exploitation toy choices",
+    "delivery / collection / maintenance choices with explicit payoffs",
+}
+
+
+@dataclass(frozen=True)
+class Stage10GoalCase:
+    """One curated Stage 10 goal-directed-behavior case."""
+
+    case_id: str
+    task_family: str
+    task_text: str
+    expected_answer: str
+    scoring_type: str
+    goal_focus: str
+    novelty_notes: str
+    notes: str
+    current_state: str | None = None
+    objective: str | None = None
+    candidate_actions: list[str] = field(default_factory=list)
+    action_costs: dict[str, float] = field(default_factory=dict)
+    action_rewards: dict[str, float] = field(default_factory=dict)
+    penalties: dict[str, float] = field(default_factory=dict)
+    action_time_costs: dict[str, float] = field(default_factory=dict)
+    resource_budget: float | None = None
+    time_budget: float | None = None
+    world_rules: list[str] = field(default_factory=list)
+    expected_best_action: str | None = None
+    expected_objective_score: float | None = None
+    validation_rules: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "Stage10GoalCase":
+        required_fields = [
+            "case_id",
+            "task_family",
+            "task_text",
+            "expected_answer",
+            "scoring_type",
+            "goal_focus",
+            "novelty_notes",
+            "notes",
+        ]
+        missing = [field_name for field_name in required_fields if field_name not in mapping]
+        if missing:
+            raise Stage10CaseLoadError(
+                "Goal-directed case is missing required field(s): " + ", ".join(missing)
+            )
+
+        values: dict[str, str] = {}
+        for field_name in required_fields:
+            values[field_name] = require_non_empty_string(
+                mapping=mapping,
+                field_name=field_name,
+                error_type=Stage10CaseLoadError,
+                object_label="Goal-directed case",
+            )
+
+        task_family_key = values["task_family"].strip().lower()
+        if task_family_key not in ALLOWED_GOAL_TASK_FAMILIES:
+            allowed = ", ".join(sorted(ALLOWED_GOAL_TASK_FAMILIES))
+            raise Stage10CaseLoadError(
+                f"Unsupported task_family '{values['task_family']}'. Allowed values: {allowed}."
+            )
+
+        scoring_key = " ".join(values["scoring_type"].strip().lower().replace("_", " ").split())
+        if scoring_key not in ALLOWED_GOAL_SCORING_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_GOAL_SCORING_TYPES))
+            raise Stage10CaseLoadError(
+                f"Unsupported Stage 10 scoring_type '{values['scoring_type']}'. Allowed values: {allowed}."
+            )
+
+        current_state = cls._optional_non_empty_string(mapping, "current_state")
+        objective = cls._optional_non_empty_string(mapping, "objective")
+        expected_best_action = cls._optional_non_empty_string(mapping, "expected_best_action")
+        candidate_actions = cls._optional_string_list(mapping, "candidate_actions")
+        if candidate_actions and len(candidate_actions) < 2:
+            raise Stage10CaseLoadError(
+                "Goal-directed case field 'candidate_actions' must contain at least 2 actions when provided."
+            )
+        if candidate_actions and len(candidate_actions) > 10:
+            raise Stage10CaseLoadError(
+                "Goal-directed case field 'candidate_actions' must contain at most 10 actions."
+            )
+
+        action_costs = cls._optional_numeric_mapping(mapping, "action_costs")
+        action_rewards = cls._optional_numeric_mapping(mapping, "action_rewards")
+        penalties = cls._optional_numeric_mapping(mapping, "penalties")
+        action_time_costs = cls._optional_numeric_mapping(mapping, "action_time_costs")
+        resource_budget = cls._optional_number(mapping, "resource_budget")
+        time_budget = cls._optional_number(mapping, "time_budget")
+        world_rules = cls._optional_string_list(mapping, "world_rules")
+        expected_objective_score = cls._optional_number(mapping, "expected_objective_score")
+        validation_rules = mapping.get("validation_rules", {})
+        if validation_rules is None:
+            validation_rules = {}
+        if not isinstance(validation_rules, dict):
+            raise Stage10CaseLoadError(
+                "Goal-directed case field 'validation_rules' must be a JSON object when provided."
+            )
+
+        return cls(
+            **values,
+            current_state=current_state,
+            objective=objective,
+            candidate_actions=candidate_actions,
+            action_costs=action_costs,
+            action_rewards=action_rewards,
+            penalties=penalties,
+            action_time_costs=action_time_costs,
+            resource_budget=resource_budget,
+            time_budget=time_budget,
+            world_rules=world_rules,
+            expected_best_action=expected_best_action,
+            expected_objective_score=expected_objective_score,
+            validation_rules=dict(validation_rules),
+        )
+
+    @staticmethod
+    def _optional_non_empty_string(mapping: Mapping[str, Any], field_name: str) -> str | None:
+        value = mapping.get(field_name)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise Stage10CaseLoadError(
+                f"Goal-directed case field '{field_name}' must be a non-empty string when provided."
+            )
+        return value.strip()
+
+    @staticmethod
+    def _optional_string_list(mapping: Mapping[str, Any], field_name: str) -> list[str]:
+        value = mapping.get(field_name)
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise Stage10CaseLoadError(
+                f"Goal-directed case field '{field_name}' must be a JSON list when provided."
+            )
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise Stage10CaseLoadError(
+                    f"Goal-directed case field '{field_name}' must contain only non-empty strings."
+                )
+            normalized.append(item.strip())
+        return normalized
+
+    @staticmethod
+    def _optional_numeric_mapping(mapping: Mapping[str, Any], field_name: str) -> dict[str, float]:
+        value = mapping.get(field_name)
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise Stage10CaseLoadError(
+                f"Goal-directed case field '{field_name}' must be a JSON object when provided."
+            )
+        normalized: dict[str, float] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key.strip():
+                raise Stage10CaseLoadError(
+                    f"Goal-directed case field '{field_name}' must use non-empty string keys."
+                )
+            if not isinstance(item, (int, float)):
+                raise Stage10CaseLoadError(
+                    f"Goal-directed case field '{field_name}' values must be numbers."
+                )
+            normalized[key.strip()] = float(item)
+        return normalized
+
+    @staticmethod
+    def _optional_number(mapping: Mapping[str, Any], field_name: str) -> float | None:
+        value = mapping.get(field_name)
+        if value is None:
+            return None
+        if not isinstance(value, (int, float)):
+            raise Stage10CaseLoadError(
+                f"Goal-directed case field '{field_name}' must be a number when provided."
+            )
+        return float(value)
+
+
+class GoalCaseLoader:
+    """Load and validate the Stage 10 goal-directed benchmark cases."""
+
+    def load(self, path: str, limit: int | None = None) -> list[Stage10GoalCase]:
+        case_path = Path(path)
+        if not case_path.exists():
+            raise Stage10CaseLoadError(f"Goal-directed case file was not found: {case_path}")
+
+        try:
+            payload = read_json_payload(case_path, "goal-directed case")
+        except ValueError as exc:
+            raise Stage10CaseLoadError(str(exc)) from exc
+
+        if isinstance(payload, dict) and "cases" in payload:
+            payload = payload["cases"]
+
+        if not isinstance(payload, list):
+            raise Stage10CaseLoadError(
+                "Goal-directed case file must contain a JSON list of case objects "
+                "or an object with a 'cases' list."
+            )
+
+        cases: list[Stage10GoalCase] = []
+        seen_case_ids: set[str] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise Stage10CaseLoadError(
+                    "Each goal-directed case must be a JSON object with the required fields."
+                )
+
+            case = Stage10GoalCase.from_mapping(item)
+            if case.case_id in seen_case_ids:
+                raise Stage10CaseLoadError(f"Duplicate case_id found: {case.case_id}")
+            seen_case_ids.add(case.case_id)
+            cases.append(case)
+
+        return cases[:limit] if limit is not None else cases
+
+
+@dataclass(frozen=True)
+class GoalArtifact:
+    """Compact goal-directed artifact requested from the model."""
+
+    current_state: str
+    objective: str
+    candidate_actions: list[str]
+    action_value_notes: list[str]
+    chosen_action_or_sequence: str
+    projected_outcome: str
+    final_answer: str
+
+
+@dataclass(frozen=True)
+class GoalVerificationArtifact:
+    """Compact verification artifact produced in the bounded Stage 10 verification pass."""
+
+    verification_note: str
+    verified_final_answer: str
+
+
+@dataclass(frozen=True)
+class GoalDeterministicValidationResult:
+    """Structured deterministic validation summary for one Stage 10 artifact."""
+
+    validation_note: str
+    best_action: str | None
+    best_objective_score: float | None
+    chosen_action: str | None
+    chosen_objective_score: float | None
+    choice_is_optimal: bool | None
+    candidate_scores: dict[str, float]
+
+
+class GoalPromptBuilder:
+    """Build explicit direct, structured, and verification prompts for Stage 10."""
+
+    def build_direct_prompt(self, case: Stage10GoalCase) -> str:
+        sections = [
+            "You are being evaluated on a bounded Stage 10 goal-directed behavior benchmark.",
+            "This is the direct-answer baseline condition.",
+            "Choose the action or short action sequence that best optimizes the stated objective.",
+            "Return only the final answer. Do not explain your reasoning.",
+            "",
+            "=== TASK FAMILY ===",
+            case.task_family,
+            "",
+            "=== TASK ===",
+            case.task_text,
+        ]
+        self._append_case_context(sections, case)
+        sections.extend(["", "=== FINAL ANSWER ==="])
+        return "\n".join(sections)
+
+    def build_goal_prompt(self, case: Stage10GoalCase) -> str:
+        sections = [
+            "You are being evaluated on a bounded Stage 10 goal-directed behavior benchmark.",
+            "This is the goal-directed condition.",
+            "Explicitly represent the objective, candidate actions, and tradeoffs before giving the final answer.",
+            "Return JSON only. Do not use markdown fences.",
+            "Do not provide hidden chain-of-thought or long essays.",
+            "Fill this exact schema with brief values:",
+            "{",
+            '  "current_state": "brief relevant current state",',
+            '  "objective": "brief optimization objective",',
+            '  "candidate_actions": ["action 1", "action 2"],',
+            '  "action_value_notes": ["brief value or tradeoff note 1", "brief value or tradeoff note 2"],',
+            '  "chosen_action_or_sequence": "best action or short sequence",',
+            '  "projected_outcome": "brief expected result if chosen action is taken",',
+            '  "final_answer": "best current final answer"',
+            "}",
+            "Requirements:",
+            "- candidate_actions must contain between 2 and 6 short actions or short action sequences.",
+            "- action_value_notes must contain between 1 and 6 short tradeoff notes.",
+            "- Keep every field compact and inspectable.",
+            "- final_answer must contain the answer you currently endorse.",
+            "",
+            "=== TASK FAMILY ===",
+            case.task_family,
+            "",
+            "=== GOAL FOCUS ===",
+            case.goal_focus,
+            "",
+            "=== TASK ===",
+            case.task_text,
+        ]
+        self._append_case_context(sections, case)
+        return "\n".join(sections)
+
+    def build_verification_prompt(
+        self,
+        case: Stage10GoalCase,
+        artifact: GoalArtifact,
+        deterministic_validation_note: str,
+    ) -> str:
+        artifact_json = json.dumps(asdict(artifact), ensure_ascii=False, indent=2)
+        sections = [
+            "You are being evaluated on a bounded Stage 10 goal-directed behavior benchmark.",
+            "This is the verification condition.",
+            "Check whether the chosen action or action sequence actually optimizes the stated objective in the bounded toy world.",
+            "Use the deterministic utility note as a grounded check, but still return only the compact JSON object below.",
+            "Return JSON only. Do not use markdown fences.",
+            "Return this exact schema:",
+            "{",
+            '  "verification_note": "brief note about whether the chosen action fits the objective",',
+            '  "verified_final_answer": "the final answer to use for scoring"',
+            "}",
+            "If the candidate final answer is wrong, correct it.",
+            "Keep the note brief and use the verified_final_answer field for the answer itself.",
+            "",
+            "=== TASK FAMILY ===",
+            case.task_family,
+            "",
+            "=== TASK ===",
+            case.task_text,
+        ]
+        self._append_case_context(sections, case)
+        sections.extend(
+            [
+                "",
+                "=== CANDIDATE GOAL-DIRECTED ARTIFACT ===",
+                artifact_json,
+                "",
+                "=== DETERMINISTIC UTILITY NOTE ===",
+                deterministic_validation_note,
+            ]
+        )
+        return "\n".join(sections)
+
+    def _append_case_context(self, sections: list[str], case: Stage10GoalCase) -> None:
+        if case.current_state:
+            sections.extend(["", "=== CURRENT STATE ===", case.current_state])
+        if case.objective:
+            sections.extend(["", "=== OBJECTIVE ===", case.objective])
+        if case.candidate_actions:
+            sections.extend(["", "=== CANDIDATE ACTIONS ===", *[f"- {item}" for item in case.candidate_actions]])
+        if case.action_rewards:
+            sections.extend(["", "=== ACTION REWARDS ===", json.dumps(case.action_rewards, ensure_ascii=False, indent=2)])
+        if case.action_costs:
+            sections.extend(["", "=== ACTION COSTS ===", json.dumps(case.action_costs, ensure_ascii=False, indent=2)])
+        if case.penalties:
+            sections.extend(["", "=== ACTION PENALTIES ===", json.dumps(case.penalties, ensure_ascii=False, indent=2)])
+        if case.action_time_costs:
+            sections.extend(["", "=== ACTION TIME COSTS ===", json.dumps(case.action_time_costs, ensure_ascii=False, indent=2)])
+        if case.resource_budget is not None:
+            sections.extend(["", "=== RESOURCE BUDGET ===", str(case.resource_budget)])
+        if case.time_budget is not None:
+            sections.extend(["", "=== TIME BUDGET ===", str(case.time_budget)])
+        if case.world_rules:
+            sections.extend(["", "=== WORLD RULES ===", *[f"- {item}" for item in case.world_rules]])
+        if case.expected_best_action:
+            sections.extend(["", "=== DATASET CHECK ONLY ===", "There is a single best action under the stated objective."])
+
+
+class GoalOutputParser:
+    """Safely parse the structured Stage 10 goal-directed outputs."""
+
+    def parse_goal_artifact(
+        self,
+        raw_output: str,
+    ) -> tuple[GoalArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Goal-directed output must be a JSON object."
+
+        required_keys = {
+            "current_state",
+            "objective",
+            "candidate_actions",
+            "action_value_notes",
+            "chosen_action_or_sequence",
+            "projected_outcome",
+            "final_answer",
+        }
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Goal-directed output is missing required key(s): " + ", ".join(sorted(missing))
+
+        candidate_actions = payload.get("candidate_actions")
+        action_value_notes = payload.get("action_value_notes")
+
+        if not isinstance(candidate_actions, list) or not candidate_actions:
+            return None, "Goal-directed output field 'candidate_actions' must be a non-empty JSON list."
+        if not isinstance(action_value_notes, list) or not action_value_notes:
+            return None, "Goal-directed output field 'action_value_notes' must be a non-empty JSON list."
+
+        normalized_candidate_actions: list[str] = []
+        for item in candidate_actions:
+            if not isinstance(item, str) or not item.strip():
+                return None, "Each candidate action must be a non-empty string."
+            normalized_candidate_actions.append(item.strip())
+
+        normalized_action_value_notes: list[str] = []
+        for item in action_value_notes:
+            if not isinstance(item, str) or not item.strip():
+                return None, "Each action value note must be a non-empty string."
+            normalized_action_value_notes.append(item.strip())
+
+        if not 2 <= len(normalized_candidate_actions) <= 6:
+            return None, "Goal-directed output field 'candidate_actions' must contain between 2 and 6 items."
+        if not 1 <= len(normalized_action_value_notes) <= 6:
+            return None, "Goal-directed output field 'action_value_notes' must contain between 1 and 6 items."
+
+        string_fields = {
+            "current_state": payload.get("current_state"),
+            "objective": payload.get("objective"),
+            "chosen_action_or_sequence": payload.get("chosen_action_or_sequence"),
+            "projected_outcome": payload.get("projected_outcome"),
+            "final_answer": payload.get("final_answer"),
+        }
+        for key, value in string_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                return None, f"Goal-directed output field '{key}' must be a non-empty string."
+
+        return (
+            GoalArtifact(
+                current_state=payload["current_state"].strip(),
+                objective=payload["objective"].strip(),
+                candidate_actions=normalized_candidate_actions,
+                action_value_notes=normalized_action_value_notes,
+                chosen_action_or_sequence=payload["chosen_action_or_sequence"].strip(),
+                projected_outcome=payload["projected_outcome"].strip(),
+                final_answer=payload["final_answer"].strip(),
+            ),
+            None,
+        )
+
+    def parse_verification_output(
+        self,
+        raw_output: str,
+    ) -> tuple[GoalVerificationArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Verification output must be a JSON object."
+
+        required_keys = {"verification_note", "verified_final_answer"}
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Verification output is missing required key(s): " + ", ".join(sorted(missing))
+
+        verification_note = payload.get("verification_note")
+        verified_final_answer = payload.get("verified_final_answer")
+
+        if not isinstance(verification_note, str) or not verification_note.strip():
+            return None, "Verification output field 'verification_note' must be a non-empty string."
+        if not isinstance(verified_final_answer, str) or not verified_final_answer.strip():
+            return None, "Verification output field 'verified_final_answer' must be a non-empty string."
+
+        return (
+            GoalVerificationArtifact(
+                verification_note=verification_note.strip(),
+                verified_final_answer=verified_final_answer.strip(),
+            ),
+            None,
+        )
+
+    def _extract_first_json_object(self, raw_output: str) -> Any:
+        text = raw_output.strip()
+        if not text:
+            raise ValueError("Model returned an empty structured output.")
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                payload, _end = decoder.raw_decode(text[index:])
+                return payload
+            except json.JSONDecodeError:
+                continue
+
+        raise ValueError("Could not find a valid JSON object in the model output.")
+
+
+class GoalDeterministicValidator:
+    """Lightweight deterministic utility checks for Stage 10 goal artifacts."""
+
+    def validate(self, case: Stage10GoalCase, artifact: GoalArtifact) -> GoalDeterministicValidationResult:
+        candidates = case.candidate_actions if case.candidate_actions else artifact.candidate_actions
+        if not candidates:
+            return GoalDeterministicValidationResult(
+                validation_note="Deterministic checks could not run because no candidate actions were available.",
+                best_action=None,
+                best_objective_score=None,
+                chosen_action=None,
+                chosen_objective_score=None,
+                choice_is_optimal=None,
+                candidate_scores={},
+            )
+
+        scored_candidates: list[tuple[str, float, float, float, bool]] = []
+        infeasible_notes: list[str] = []
+
+        for action in candidates:
+            reward = float(case.action_rewards.get(action, 0.0))
+            cost = float(case.action_costs.get(action, 0.0))
+            penalty = float(case.penalties.get(action, 0.0))
+            time_cost = float(case.action_time_costs.get(action, 0.0))
+            feasible = True
+
+            if case.resource_budget is not None and cost > case.resource_budget:
+                feasible = False
+                infeasible_notes.append(
+                    f"{action} exceeds the resource budget ({cost:g} > {case.resource_budget:g})"
+                )
+            if case.time_budget is not None and time_cost > case.time_budget:
+                feasible = False
+                infeasible_notes.append(
+                    f"{action} exceeds the time budget ({time_cost:g} > {case.time_budget:g})"
+                )
+
+            score = reward - cost - penalty
+            scored_candidates.append((action, score, cost, time_cost, feasible))
+
+        feasible_candidates = [item for item in scored_candidates if item[4]]
+        if feasible_candidates:
+            best_action, best_score, best_cost, best_time, _ = max(
+                feasible_candidates,
+                key=lambda item: (item[1], -item[2], -item[3], item[0].casefold()),
+            )
+        else:
+            best_action = None
+            best_score = None
+
+        chosen_action = self._match_action(
+            artifact.chosen_action_or_sequence or artifact.final_answer,
+            candidates,
+        )
+        chosen_score = None
+        choice_is_optimal = None
+        issues: list[str] = []
+
+        if chosen_action is None:
+            issues.append("chosen action does not match any declared candidate action")
+        else:
+            for action, score, _cost, _time, feasible in scored_candidates:
+                if action == chosen_action:
+                    chosen_score = score
+                    if not feasible:
+                        issues.append("chosen action is infeasible under the stated budget")
+                    break
+            if best_action is not None:
+                choice_is_optimal = chosen_action == best_action
+                if not choice_is_optimal:
+                    issues.append(f"chosen action is not the best feasible action; best is '{best_action}'")
+
+        if case.expected_best_action and best_action and self._normalize(case.expected_best_action) != self._normalize(best_action):
+            issues.append(
+                "dataset integrity warning: expected_best_action does not match deterministic best action"
+            )
+
+        if (
+            case.expected_objective_score is not None
+            and best_score is not None
+            and abs(case.expected_objective_score - best_score) > 1e-9
+        ):
+            issues.append(
+                "dataset integrity warning: expected_objective_score does not match deterministic best score"
+            )
+
+        score_table = "; ".join(
+            f"{action}={score:g}{' [infeasible]' if not feasible else ''}"
+            for action, score, _cost, _time, feasible in scored_candidates
+        )
+        note_parts = [
+            f"Deterministic utility check: {score_table}."
+        ]
+        if best_action is not None and best_score is not None:
+            note_parts.append(f"Best feasible action: {best_action} ({best_score:g}).")
+        if chosen_action is not None and chosen_score is not None:
+            note_parts.append(f"Chosen action: {chosen_action} ({chosen_score:g}).")
+        if infeasible_notes:
+            note_parts.append("Budget notes: " + "; ".join(infeasible_notes) + ".")
+        if issues:
+            note_parts.append("Issues: " + "; ".join(issues) + ".")
+        else:
+            note_parts.append("Chosen action matches the best feasible action under the explicit utility rules.")
+
+        return GoalDeterministicValidationResult(
+            validation_note=" ".join(note_parts),
+            best_action=best_action,
+            best_objective_score=best_score,
+            chosen_action=chosen_action,
+            chosen_objective_score=chosen_score,
+            choice_is_optimal=choice_is_optimal,
+            candidate_scores={action: score for action, score, _cost, _time, _feasible in scored_candidates},
+        )
+
+    def _match_action(self, raw_value: str, candidates: Sequence[str]) -> str | None:
+        normalized_raw = self._normalize(raw_value)
+        for candidate in candidates:
+            if self._normalize(candidate) == normalized_raw:
+                return candidate
+        for candidate in candidates:
+            normalized_candidate = self._normalize(candidate)
+            if normalized_candidate and normalized_candidate in normalized_raw:
+                return candidate
+        return None
+
+    def _normalize(self, value: str) -> str:
+        return " ".join(value.split()).casefold()
+
+
+@dataclass
+class GoalCaseResult:
+    """Structured result for one Stage 10 goal-directed case."""
+
+    case_id: str
+    task_family: str
+    scoring_type: str
+    expected_answer: str
+    direct_answer: str
+    goal_raw_output: str
+    parsed_goal_artifact: dict[str, Any] | None
+    verified_final_answer: str
+    direct_pass: bool
+    goal_pass: bool
+    goal_helped: bool
+    regression: bool
+    direct_scoring_error: str | None = None
+    goal_scoring_error: str | None = None
+    parse_error: str | None = None
+    probable_failure_reason: str | None = None
+    verification_raw_output: str | None = None
+    verification_note: str | None = None
+    goal_grounded_answer: str | None = None
+    projected_outcome: str | None = None
+    candidate_count: int = 0
+    deterministic_validation_note: str | None = None
+    expected_objective_score: float | None = None
+    chosen_action_or_sequence: str | None = None
+    deterministic_best_action: str | None = None
+    chosen_objective_score: float | None = None
+
+
+class GoalEvaluator:
+    """Run direct-answer versus structured-and-verified goal-directed evaluation for Stage 10."""
+
+    def __init__(
+        self,
+        ollama_client: OllamaChatClient,
+        model: str,
+        temperature: float,
+        prompt_builder: GoalPromptBuilder | None = None,
+        output_parser: GoalOutputParser | None = None,
+        scoring_engine: ScoringEngine | None = None,
+        deterministic_validator: GoalDeterministicValidator | None = None,
+    ) -> None:
+        self.ollama_client = ollama_client
+        self.model = model
+        self.temperature = temperature
+        self.prompt_builder = prompt_builder if prompt_builder is not None else GoalPromptBuilder()
+        self.output_parser = output_parser if output_parser is not None else GoalOutputParser()
+        self.scoring_engine = scoring_engine if scoring_engine is not None else ScoringEngine()
+        self.deterministic_validator = (
+            deterministic_validator if deterministic_validator is not None else GoalDeterministicValidator()
+        )
+
+    def evaluate_case(self, case: Stage10GoalCase) -> GoalCaseResult:
+        direct_answer = self._run_single_prompt(self.prompt_builder.build_direct_prompt(case))
+        goal_raw_output = self._run_single_prompt(self.prompt_builder.build_goal_prompt(case))
+
+        parsed_artifact, parse_error = self.output_parser.parse_goal_artifact(goal_raw_output)
+        goal_grounded_answer = parsed_artifact.final_answer if parsed_artifact is not None else None
+        projected_outcome = parsed_artifact.projected_outcome if parsed_artifact is not None else None
+        candidate_count = len(parsed_artifact.candidate_actions) if parsed_artifact is not None else 0
+        chosen_action_or_sequence = (
+            parsed_artifact.chosen_action_or_sequence if parsed_artifact is not None else None
+        )
+
+        verification_raw_output: str | None = None
+        verification_note: str | None = None
+        verified_final_answer = ""
+        deterministic_validation_result: GoalDeterministicValidationResult | None = None
+
+        if parsed_artifact is not None:
+            deterministic_validation_result = self.deterministic_validator.validate(case, parsed_artifact)
+            verification_raw_output = self._run_single_prompt(
+                self.prompt_builder.build_verification_prompt(
+                    case=case,
+                    artifact=parsed_artifact,
+                    deterministic_validation_note=deterministic_validation_result.validation_note,
+                )
+            )
+            parsed_verification, verification_parse_error = self.output_parser.parse_verification_output(
+                verification_raw_output
+            )
+
+            if verification_parse_error:
+                parse_error = self._combine_errors(parse_error, verification_parse_error)
+                verification_note = "Verification output could not be parsed cleanly; using goal artifact final answer."
+                verified_final_answer = parsed_artifact.final_answer
+            else:
+                assert parsed_verification is not None
+                verification_note = parsed_verification.verification_note
+                verified_final_answer = parsed_verification.verified_final_answer
+        else:
+            verification_note = None
+            verified_final_answer = ""
+
+        direct_pass, direct_scoring_error = self.scoring_engine.score_answer(
+            answer=direct_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+        goal_pass, goal_scoring_error = self.scoring_engine.score_answer(
+            answer=verified_final_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+
+        goal_helped = (not direct_pass) and goal_pass
+        regression = direct_pass and (not goal_pass)
+
+        probable_failure_reason = self._infer_failure_reason(
+            direct_answer=direct_answer,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            goal_pass=goal_pass,
+            direct_scoring_error=direct_scoring_error,
+            goal_scoring_error=goal_scoring_error,
+            parse_error=parse_error,
+            deterministic_validation_result=deterministic_validation_result,
+        )
+
+        return GoalCaseResult(
+            case_id=case.case_id,
+            task_family=case.task_family,
+            scoring_type=case.scoring_type,
+            expected_answer=case.expected_answer,
+            direct_answer=direct_answer,
+            goal_raw_output=goal_raw_output,
+            parsed_goal_artifact=asdict(parsed_artifact) if parsed_artifact is not None else None,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            goal_pass=goal_pass,
+            goal_helped=goal_helped,
+            regression=regression,
+            direct_scoring_error=direct_scoring_error,
+            goal_scoring_error=goal_scoring_error,
+            parse_error=parse_error,
+            probable_failure_reason=probable_failure_reason,
+            verification_raw_output=verification_raw_output,
+            verification_note=verification_note,
+            goal_grounded_answer=goal_grounded_answer,
+            projected_outcome=projected_outcome,
+            candidate_count=candidate_count,
+            deterministic_validation_note=(
+                deterministic_validation_result.validation_note if deterministic_validation_result is not None else None
+            ),
+            expected_objective_score=case.expected_objective_score,
+            chosen_action_or_sequence=chosen_action_or_sequence,
+            deterministic_best_action=(
+                deterministic_validation_result.best_action if deterministic_validation_result is not None else None
+            ),
+            chosen_objective_score=(
+                deterministic_validation_result.chosen_objective_score
+                if deterministic_validation_result is not None
+                else None
+            ),
+        )
+
+    def evaluate_cases(self, cases: Sequence[Stage10GoalCase]) -> list[GoalCaseResult]:
+        return [self.evaluate_case(case) for case in cases]
+
+    def build_scorecard(self, results: Sequence[GoalCaseResult]) -> dict[str, Any]:
+        total_cases = len(results)
+        direct_pass_count = sum(result.direct_pass for result in results)
+        goal_pass_count = sum(result.goal_pass for result in results)
+        goal_improvement_count = sum(result.goal_helped for result in results)
+        regression_count = sum(result.regression for result in results)
+        parse_error_count = sum(1 for result in results if result.parse_error)
+
+        direct_pass_rate = (direct_pass_count / total_cases) if total_cases else 0.0
+        goal_pass_rate = (goal_pass_count / total_cases) if total_cases else 0.0
+
+        return {
+            "total_cases": total_cases,
+            "direct_pass_count": direct_pass_count,
+            "goal_pass_count": goal_pass_count,
+            "goal_improvement_count": goal_improvement_count,
+            "regression_count": regression_count,
+            "parse_error_count": parse_error_count,
+            "direct_pass_rate": round(direct_pass_rate, 4),
+            "goal_pass_rate": round(goal_pass_rate, 4),
+            "pass_rate": round(goal_pass_rate, 4),
+            "per_case_details": [asdict(result) for result in results],
+        }
+
+    def _run_single_prompt(self, prompt: str) -> str:
+        try:
+            return self.ollama_client.send_chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+        except OllamaServiceError as exc:
+            return f"ERROR: {exc}"
+
+    def _combine_errors(self, existing: str | None, new_error: str | None) -> str | None:
+        if not new_error:
+            return existing
+        if not existing:
+            return new_error
+        return f"{existing} ; {new_error}"
+
+    def _infer_failure_reason(
+        self,
+        direct_answer: str,
+        verified_final_answer: str,
+        direct_pass: bool,
+        goal_pass: bool,
+        direct_scoring_error: str | None,
+        goal_scoring_error: str | None,
+        parse_error: str | None,
+        deterministic_validation_result: GoalDeterministicValidationResult | None,
+    ) -> str | None:
+        if direct_pass and goal_pass:
+            return None
+
+        if direct_scoring_error or goal_scoring_error:
+            problems = [item for item in [direct_scoring_error, goal_scoring_error] if item]
+            return " ; ".join(problems)
+
+        if parse_error:
+            return f"Structured goal-directed or verification output was malformed: {parse_error}"
+
+        if deterministic_validation_result is not None and deterministic_validation_result.choice_is_optimal is False:
+            return deterministic_validation_result.validation_note
+
+        if direct_answer.startswith("ERROR:") or verified_final_answer.startswith("ERROR:"):
+            return "A model call failed during evaluation."
+
+        if direct_pass and not goal_pass:
+            return "The goal-directed scaffold or verification pass destabilized a previously correct direct answer."
+
+        if (not direct_pass) and (not goal_pass):
+            direct_norm = self.scoring_engine.normalize_whitespace(direct_answer).casefold()
+            goal_norm = self.scoring_engine.normalize_whitespace(verified_final_answer).casefold()
+            if direct_norm == goal_norm:
+                return "The goal-directed path did not materially improve the final answer."
+            return "The goal-directed path changed the answer, but the verified final answer was still incorrect."
+
+        return None
+
+
+class GoalFailureLogWriter(FailureLogWriter):
+    """Extend the shared failure-log writer with Stage 10 support."""
+
+    def write_goal_log(self, path: str | Path, results: Sequence[GoalCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.goal_pass]
+
+        lines: list[str] = [
+            "# Stage 10 Failure Log",
+            "",
+            f"Total failed verified-goal cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All verified-goal cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Task family: {result.task_family}",
+                        f"- Expected answer: `{result.expected_answer}`",
+                        f"- Direct answer: `{result.direct_answer}`",
+                        f"- Verified goal-directed final answer: `{result.verified_final_answer}`",
+                        f"- Parse error: {result.parse_error or 'None'}",
+                        f"- Deterministic validation note: {result.deterministic_validation_note or 'None'}",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+
+class Stage10CLIApp(Stage9CLIApp):
+    """Top-level controller preserving Stages 1-9 and adding Stage 10 modes."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        ollama_client: OllamaChatClient,
+        transfer_case_loader: TransferCaseLoader | None = None,
+        adaptation_case_loader: AdaptationCaseLoader | None = None,
+        fewshot_case_loader: FewShotCaseLoader | None = None,
+        reasoning_case_loader: ReasoningCaseLoader | None = None,
+        commonsense_case_loader: CommonSenseCaseLoader | None = None,
+        abstract_case_loader: AbstractCaseLoader | None = None,
+        causal_case_loader: CausalCaseLoader | None = None,
+        planning_case_loader: PlanningCaseLoader | None = None,
+        goal_case_loader: GoalCaseLoader | None = None,
+        scorecard_writer: ScorecardWriter | None = None,
+        failure_log_writer: FailureLogWriter | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            ollama_client=ollama_client,
+            transfer_case_loader=transfer_case_loader,
+            adaptation_case_loader=adaptation_case_loader,
+            fewshot_case_loader=fewshot_case_loader,
+            reasoning_case_loader=reasoning_case_loader,
+            commonsense_case_loader=commonsense_case_loader,
+            abstract_case_loader=abstract_case_loader,
+            causal_case_loader=causal_case_loader,
+            planning_case_loader=planning_case_loader,
+            scorecard_writer=scorecard_writer,
+            failure_log_writer=(failure_log_writer if failure_log_writer is not None else GoalFailureLogWriter()),
+        )
+        self.goal_case_loader = goal_case_loader if goal_case_loader is not None else GoalCaseLoader()
+
+    def run(self) -> int:
+        if self.config.mode in {"goal-demo", "goal-eval"}:
+            return self._run_goal_modes()
+        return super().run()
+
+    def _run_goal_modes(self) -> int:
+        try:
+            cases = self.goal_case_loader.load(self.config.cases_path, limit=self.config.limit)
+        except Stage10CaseLoadError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        if not cases:
+            print("Error: The goal-directed case file loaded successfully but contained no cases.")
+            return 1
+
+        evaluator = GoalEvaluator(
+            ollama_client=self.ollama_client,
+            model=self.config.model,
+            temperature=self.config.temperature,
+        )
+
+        if self.config.mode == "goal-demo":
+            return self._run_goal_demo(evaluator=evaluator, cases=cases)
+
+        return self._run_goal_eval(evaluator=evaluator, cases=cases)
+
+    def _run_goal_demo(
+        self,
+        evaluator: GoalEvaluator,
+        cases: Sequence[Stage10GoalCase],
+    ) -> int:
+        print(f"Loaded goal-directed cases: {len(cases)}")
+
+        for index, case in enumerate(cases, start=1):
+            result = evaluator.evaluate_case(case)
+            print("-" * 72)
+            print(f"Demo case {index}: {case.case_id}")
+            print(f"Task family: {case.task_family}")
+            print(f"Direct answer: {result.direct_answer}")
+            print(f"Goal-grounded answer: {result.goal_grounded_answer or 'PARSE FAILED'}")
+            print(f"Verified final outcome: {result.verified_final_answer or 'N/A'}")
+            print(f"Expected answer: {case.expected_answer}")
+            print(f"Goal-directed evaluation helped: {'YES' if result.goal_helped else 'NO'}")
+
+        return 0
+
+    def _run_goal_eval(
+        self,
+        evaluator: GoalEvaluator,
+        cases: Sequence[Stage10GoalCase],
+    ) -> int:
+        results = evaluator.evaluate_cases(cases)
+        scorecard = evaluator.build_scorecard(results)
+
+        scorecard_path = self.scorecard_writer.write(self.config.scorecard_out, scorecard)
+        if hasattr(self.failure_log_writer, "write_goal_log"):
+            failure_log_path = self.failure_log_writer.write_goal_log(self.config.failure_log_out, results)  # type: ignore[attr-defined]
+        else:
+            failure_log_path = GoalFailureLogWriter().write_goal_log(self.config.failure_log_out, results)
+
+        print("Goal-directed evaluation complete.")
+        print(f"Total cases: {scorecard['total_cases']}")
+        print(f"Direct passes: {scorecard['direct_pass_count']}")
+        print(f"Verified goal-directed passes: {scorecard['goal_pass_count']}")
+        print(f"Goal-directed improvements: {scorecard['goal_improvement_count']}")
+        print(f"Regressions: {scorecard['regression_count']}")
+        print(f"Parse errors: {scorecard['parse_error_count']}")
+        print(f"Direct pass rate: {scorecard['direct_pass_rate']:.2%}")
+        print(f"Verified goal-directed pass rate: {scorecard['goal_pass_rate']:.2%}")
+        print(f"Scorecard written to: {scorecard_path}")
+        print(f"Failure log written to: {failure_log_path}")
+
+        return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     config = ConfigResolver.resolve(argv=argv)
 
@@ -5362,7 +6524,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: {error_message}")
         return 1
 
-    app = Stage9CLIApp(config=config, ollama_client=ollama_client)
+    app = Stage10CLIApp(config=config, ollama_client=ollama_client)
     return app.run()
 
 
