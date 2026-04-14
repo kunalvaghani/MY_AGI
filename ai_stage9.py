@@ -2,21 +2,22 @@
 from __future__ import annotations
 
 """
-Stage 8 local AI assistant.
+Stage 9 local AI assistant.
 
 This file preserves the Stage 1 chat loop, the Stage 2 transfer-learning
 benchmark, the Stage 3 rapid-adaptation benchmark, the Stage 4 few-shot /
 zero-shot benchmark, the Stage 5 robust reasoning mode, and the Stage 6
 common-sense understanding mode, then adds a bounded, inspectable Stage 7
 abstract-thinking mode, then extends it with a bounded, inspectable
-Stage 8 causal-reasoning mode.
+Stage 8 causal-reasoning mode, then extends it with a bounded, inspectable
+Stage 9 long-horizon planning mode.
 
 Important honesty boundary:
 - This is not model training.
 - This is not persistent learning across runs.
 - This is not hidden long-term learning.
 - This is not Stage 4 few-shot / zero-shot competence.
-- This is not Stage 9 long-horizon planning.
+- This is not Stage 10 goal-directed behavior.
 - This is not Stage 11 subgoal decomposition.
 - This is not model training or persistent learning.
 - Stage 6 is a bounded common-sense benchmark about everyday implied facts.
@@ -24,7 +25,8 @@ Important honesty boundary:
   hierarchy, symbolic mapping, and abstraction over surface form.
 - Stage 7 does not claim world modeling, persistent learning, causal reasoning, or open-ended conceptual mastery.
 - Stage 8 is a bounded causal-reasoning benchmark about cause versus correlation, interventions, counterfactuals, simple causal chains, mediators, and confounders in toy tasks.
-- It does not claim full causal modeling, world modeling, persistent learning, or open-ended scientific reasoning.
+- Stage 9 is a bounded long-horizon planning benchmark about explicit multi-step future sequencing, dependencies, ordering constraints, simple state progression, and inspectable plan viability in toy tasks.
+- It does not claim full causal modeling, world modeling, persistent learning, open-ended scientific reasoning, autonomy, or agentic task execution.
 """
 
 import argparse
@@ -48,7 +50,7 @@ else:
     OLLAMA_IMPORT_ERROR = None
 
 
-APP_NAME = "Local AI Assistant - Stage 8"
+APP_NAME = "Local AI Assistant - Stage 9"
 DEFAULT_MODEL = "gemma3:latest"
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 DEFAULT_TEMPERATURE = 0.2
@@ -60,6 +62,7 @@ DEFAULT_STAGE5_CASES_PATH = "stage5_reasoning_cases.json"
 DEFAULT_STAGE6_CASES_PATH = "stage6_commonsense_cases.json"
 DEFAULT_STAGE7_CASES_PATH = "stage7_abstract_cases.json"
 DEFAULT_STAGE8_CASES_PATH = "stage8_causal_cases.json"
+DEFAULT_STAGE9_CASES_PATH = "stage9_planning_cases.json"
 DEFAULT_STAGE2_SCORECARD_PATH = "stage2_scorecard.json"
 DEFAULT_STAGE3_SCORECARD_PATH = "stage3_scorecard.json"
 DEFAULT_STAGE4_SCORECARD_PATH = "stage4_scorecard.json"
@@ -67,6 +70,7 @@ DEFAULT_STAGE5_SCORECARD_PATH = "stage5_scorecard.json"
 DEFAULT_STAGE6_SCORECARD_PATH = "stage6_scorecard.json"
 DEFAULT_STAGE7_SCORECARD_PATH = "stage7_scorecard.json"
 DEFAULT_STAGE8_SCORECARD_PATH = "stage8_scorecard.json"
+DEFAULT_STAGE9_SCORECARD_PATH = "stage9_scorecard.json"
 DEFAULT_STAGE2_FAILURE_LOG_PATH = "failure_log_stage2.md"
 DEFAULT_STAGE3_FAILURE_LOG_PATH = "failure_log_stage3.md"
 DEFAULT_STAGE4_FAILURE_LOG_PATH = "failure_log_stage4.md"
@@ -74,6 +78,7 @@ DEFAULT_STAGE5_FAILURE_LOG_PATH = "failure_log_stage5.md"
 DEFAULT_STAGE6_FAILURE_LOG_PATH = "failure_log_stage6.md"
 DEFAULT_STAGE7_FAILURE_LOG_PATH = "failure_log_stage7.md"
 DEFAULT_STAGE8_FAILURE_LOG_PATH = "failure_log_stage8.md"
+DEFAULT_STAGE9_FAILURE_LOG_PATH = "failure_log_stage9.md"
 
 HELP_TEXT = """Available commands:
   /help   Show this help message
@@ -96,6 +101,8 @@ SUPPORTED_MODES = [
     "abstract-eval",
     "causal-demo",
     "causal-eval",
+    "planning-demo",
+    "planning-eval",
 ]
 
 ALLOWED_ADAPTATION_TYPES = {
@@ -119,6 +126,7 @@ ALLOWED_REASONING_SCORING_TYPES = {
 ALLOWED_COMMONSENSE_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
 ALLOWED_ABSTRACT_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
 ALLOWED_CAUSAL_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
+ALLOWED_PLANNING_SCORING_TYPES = ALLOWED_REASONING_SCORING_TYPES
 
 
 def read_json_payload(path: str | Path, label: str) -> Any:
@@ -173,7 +181,7 @@ class ConfigResolver:
             description=(
                 "Run the Stage 8 local AI assistant against a local Ollama model. "
                 "Modes: chat, transfer-demo, transfer-eval, adapt-demo, adapt-eval, "
-                "fewshot-demo, fewshot-eval, reason-demo, reason-eval, commonsense-demo, commonsense-eval, abstract-demo, abstract-eval, causal-demo, causal-eval."
+                "fewshot-demo, fewshot-eval, reason-demo, reason-eval, commonsense-demo, commonsense-eval, abstract-demo, abstract-eval, causal-demo, causal-eval, planning-demo, planning-eval."
             )
         )
         parser.add_argument(
@@ -181,7 +189,7 @@ class ConfigResolver:
             dest="mode",
             choices=SUPPORTED_MODES,
             default=DEFAULT_MODE,
-            help="Run normal chat, Stage 2 transfer modes, Stage 3 adaptation modes, Stage 4 few-shot modes, Stage 5 reasoning modes, Stage 6 commonsense modes, Stage 7 abstract-thinking modes, or Stage 8 causal-reasoning modes.",
+            help="Run normal chat, Stage 2 transfer modes, Stage 3 adaptation modes, Stage 4 few-shot modes, Stage 5 reasoning modes, Stage 6 commonsense modes, Stage 7 abstract-thinking modes, Stage 8 causal-reasoning modes, or Stage 9 long-horizon planning modes.",
         )
         parser.add_argument(
             "--model",
@@ -257,6 +265,8 @@ class ConfigResolver:
             return DEFAULT_STAGE7_CASES_PATH
         if mode in {"causal-demo", "causal-eval"}:
             return DEFAULT_STAGE8_CASES_PATH
+        if mode in {"planning-demo", "planning-eval"}:
+            return DEFAULT_STAGE9_CASES_PATH
         return DEFAULT_STAGE2_CASES_PATH
 
     @staticmethod
@@ -273,6 +283,8 @@ class ConfigResolver:
             return DEFAULT_STAGE7_SCORECARD_PATH
         if mode in {"causal-demo", "causal-eval"}:
             return DEFAULT_STAGE8_SCORECARD_PATH
+        if mode in {"planning-demo", "planning-eval"}:
+            return DEFAULT_STAGE9_SCORECARD_PATH
         return DEFAULT_STAGE2_SCORECARD_PATH
 
     @staticmethod
@@ -289,6 +301,8 @@ class ConfigResolver:
             return DEFAULT_STAGE7_FAILURE_LOG_PATH
         if mode in {"causal-demo", "causal-eval"}:
             return DEFAULT_STAGE8_FAILURE_LOG_PATH
+        if mode in {"planning-demo", "planning-eval"}:
+            return DEFAULT_STAGE9_FAILURE_LOG_PATH
         return DEFAULT_STAGE2_FAILURE_LOG_PATH
 
 
@@ -4448,6 +4462,885 @@ class Stage8CLIApp(Stage7CLIApp):
         return 0
 
 
+class Stage9CaseLoadError(Exception):
+    """Raised when the planning case file cannot be loaded safely."""
+
+
+ALLOWED_PLANNING_TASK_FAMILIES = {
+    "bounded logistics planning",
+    "ordered resource preparation",
+    "dependency-constrained scheduling",
+    "toy crafting / assembly planning",
+    "multi-step route or transport planning in a toy world",
+    "state-transition planning with prerequisites",
+    "limited-action task completion in a toy environment",
+    "sequencing under deadlines in a synthetic setting",
+    "multi-step recovery / repair planning in a toy system",
+    "bounded mission plan construction in a synthetic environment",
+}
+
+
+@dataclass(frozen=True)
+class Stage9PlanningCase:
+    """One curated Stage 9 long-horizon planning case."""
+
+    case_id: str
+    task_family: str
+    task_text: str
+    expected_answer: str
+    scoring_type: str
+    planning_focus: str
+    novelty_notes: str
+    notes: str
+    initial_state: str | None = None
+    allowed_actions: list[str] = field(default_factory=list)
+    constraints: list[str] = field(default_factory=list)
+    goal: str | None = None
+    max_steps: int | None = None
+    world_rules: list[str] = field(default_factory=list)
+    expected_final_state: str | None = None
+    validation_rules: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_mapping(cls, mapping: Mapping[str, Any]) -> "Stage9PlanningCase":
+        required_fields = [
+            "case_id",
+            "task_family",
+            "task_text",
+            "expected_answer",
+            "scoring_type",
+            "planning_focus",
+            "novelty_notes",
+            "notes",
+        ]
+        missing = [field_name for field_name in required_fields if field_name not in mapping]
+        if missing:
+            raise Stage9CaseLoadError(
+                "Planning case is missing required field(s): " + ", ".join(missing)
+            )
+
+        values: dict[str, str] = {}
+        for field_name in required_fields:
+            values[field_name] = require_non_empty_string(
+                mapping=mapping,
+                field_name=field_name,
+                error_type=Stage9CaseLoadError,
+                object_label="Planning case",
+            )
+
+        task_family_key = values["task_family"].strip().lower()
+        if task_family_key not in ALLOWED_PLANNING_TASK_FAMILIES:
+            allowed = ", ".join(sorted(ALLOWED_PLANNING_TASK_FAMILIES))
+            raise Stage9CaseLoadError(
+                f"Unsupported task_family '{values['task_family']}'. Allowed values: {allowed}."
+            )
+
+        scoring_key = " ".join(values["scoring_type"].strip().lower().replace("_", " ").split())
+        if scoring_key not in ALLOWED_PLANNING_SCORING_TYPES:
+            allowed = ", ".join(sorted(ALLOWED_PLANNING_SCORING_TYPES))
+            raise Stage9CaseLoadError(
+                f"Unsupported Stage 9 scoring_type '{values['scoring_type']}'. Allowed values: {allowed}."
+            )
+
+        initial_state = cls._optional_non_empty_string(mapping, "initial_state")
+        goal = cls._optional_non_empty_string(mapping, "goal")
+        expected_final_state = cls._optional_non_empty_string(mapping, "expected_final_state")
+        allowed_actions = cls._optional_string_list(mapping, "allowed_actions")
+        constraints = cls._optional_string_list(mapping, "constraints")
+        world_rules = cls._optional_string_list(mapping, "world_rules")
+        max_steps = mapping.get("max_steps")
+        if max_steps is not None:
+            if not isinstance(max_steps, int) or max_steps <= 0:
+                raise Stage9CaseLoadError("Planning case field 'max_steps' must be a positive integer when provided.")
+        validation_rules = mapping.get("validation_rules", {})
+        if validation_rules is None:
+            validation_rules = {}
+        if not isinstance(validation_rules, dict):
+            raise Stage9CaseLoadError("Planning case field 'validation_rules' must be a JSON object when provided.")
+
+        return cls(
+            **values,
+            initial_state=initial_state,
+            allowed_actions=allowed_actions,
+            constraints=constraints,
+            goal=goal,
+            max_steps=max_steps,
+            world_rules=world_rules,
+            expected_final_state=expected_final_state,
+            validation_rules=dict(validation_rules),
+        )
+
+    @staticmethod
+    def _optional_non_empty_string(mapping: Mapping[str, Any], field_name: str) -> str | None:
+        value = mapping.get(field_name)
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise Stage9CaseLoadError(f"Planning case field '{field_name}' must be a non-empty string when provided.")
+        return value.strip()
+
+    @staticmethod
+    def _optional_string_list(mapping: Mapping[str, Any], field_name: str) -> list[str]:
+        value = mapping.get(field_name)
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise Stage9CaseLoadError(f"Planning case field '{field_name}' must be a JSON list when provided.")
+        normalized: list[str] = []
+        for item in value:
+            if not isinstance(item, str) or not item.strip():
+                raise Stage9CaseLoadError(
+                    f"Planning case field '{field_name}' must contain only non-empty strings."
+                )
+            normalized.append(item.strip())
+        return normalized
+
+
+class PlanningCaseLoader:
+    """Load and validate the Stage 9 planning benchmark cases."""
+
+    def load(self, path: str, limit: int | None = None) -> list[Stage9PlanningCase]:
+        case_path = Path(path)
+        if not case_path.exists():
+            raise Stage9CaseLoadError(f"Planning case file was not found: {case_path}")
+
+        try:
+            payload = read_json_payload(case_path, "planning case")
+        except ValueError as exc:
+            raise Stage9CaseLoadError(str(exc)) from exc
+
+        if isinstance(payload, dict) and "cases" in payload:
+            payload = payload["cases"]
+
+        if not isinstance(payload, list):
+            raise Stage9CaseLoadError(
+                "Planning case file must contain a JSON list of case objects "
+                "or an object with a 'cases' list."
+            )
+
+        cases: list[Stage9PlanningCase] = []
+        seen_case_ids: set[str] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise Stage9CaseLoadError(
+                    "Each planning case must be a JSON object with the required fields."
+                )
+
+            case = Stage9PlanningCase.from_mapping(item)
+            if case.case_id in seen_case_ids:
+                raise Stage9CaseLoadError(f"Duplicate case_id found: {case.case_id}")
+            seen_case_ids.add(case.case_id)
+            cases.append(case)
+
+        return cases[:limit] if limit is not None else cases
+
+
+@dataclass(frozen=True)
+class PlanningArtifact:
+    """Compact planning artifact requested from the model."""
+
+    initial_state: str
+    goal_state: str
+    ordered_steps: list[str]
+    dependency_notes: list[str]
+    predicted_final_state: str
+    final_answer: str
+
+
+@dataclass(frozen=True)
+class PlanningVerificationArtifact:
+    """Compact verification artifact produced in the bounded Stage 9 verification pass."""
+
+    verification_note: str
+    verified_final_answer: str
+
+
+class PlanningPromptBuilder:
+    """Build explicit direct, structured, and verification prompts for Stage 9."""
+
+    def build_direct_prompt(self, case: Stage9PlanningCase) -> str:
+        sections = [
+            "You are being evaluated on a bounded Stage 9 long-horizon planning benchmark.",
+            "This is the direct-answer baseline condition.",
+            "Answer the planning task directly, with no explicit planning scaffold.",
+            "Return only the final answer. Do not explain your reasoning.",
+            "",
+            "=== TASK FAMILY ===",
+            case.task_family,
+            "",
+            "=== TASK ===",
+            case.task_text,
+        ]
+        self._append_case_context(sections, case)
+        sections.extend(["", "=== FINAL ANSWER ==="])
+        return "\n".join(sections)
+
+    def build_planning_prompt(self, case: Stage9PlanningCase) -> str:
+        sections = [
+            "You are being evaluated on a bounded Stage 9 long-horizon planning benchmark.",
+            "This is the long-horizon planning condition.",
+            "Build a compact, inspectable planning artifact before giving the final answer.",
+            "Return JSON only. Do not use markdown fences.",
+            "Do not provide hidden chain-of-thought or long essays.",
+            "Fill this exact schema with brief values:",
+            "{",
+            '  "initial_state": "brief relevant starting state",',
+            '  "goal_state": "brief goal description",',
+            '  "ordered_steps": ["step 1", "step 2", "step 3", "step 4"],',
+            '  "dependency_notes": ["brief dependency note 1", "brief dependency note 2"],',
+            '  "predicted_final_state": "brief end state produced by the steps",',
+            '  "final_answer": "best current final answer"',
+            "}",
+            "Requirements:",
+            "- ordered_steps must contain between 4 and 10 brief steps.",
+            "- dependency_notes must be a short list of 1 to 5 brief notes.",
+            "- Keep every field compact and inspectable.",
+            "- final_answer must contain the answer you currently endorse.",
+            "",
+            "=== TASK FAMILY ===",
+            case.task_family,
+            "",
+            "=== PLANNING FOCUS ===",
+            case.planning_focus,
+            "",
+            "=== TASK ===",
+            case.task_text,
+        ]
+        self._append_case_context(sections, case)
+        return "\n".join(sections)
+
+    def build_verification_prompt(
+        self,
+        case: Stage9PlanningCase,
+        artifact: PlanningArtifact,
+        deterministic_validation_note: str,
+    ) -> str:
+        artifact_json = json.dumps(asdict(artifact), ensure_ascii=False, indent=2)
+        sections = [
+            "You are being evaluated on a bounded Stage 9 long-horizon planning benchmark.",
+            "This is the verification condition.",
+            "Check whether the candidate plan is internally coherent and whether its predicted final state fits the bounded task world.",
+            "Return JSON only. Do not use markdown fences.",
+            "Return this exact schema:",
+            "{",
+            '  "verification_note": "brief note about whether the plan is coherent and reaches the target",',
+            '  "verified_final_answer": "the final answer to use for scoring"',
+            "}",
+            "If the candidate final answer is wrong, correct it.",
+            "Keep the note brief and use the verified_final_answer field for the answer itself.",
+            "",
+            "=== TASK FAMILY ===",
+            case.task_family,
+            "",
+            "=== TASK ===",
+            case.task_text,
+        ]
+        self._append_case_context(sections, case)
+        sections.extend(
+            [
+                "",
+                "=== DETERMINISTIC VALIDATION NOTE ===",
+                deterministic_validation_note,
+                "",
+                "=== CANDIDATE PLANNING ARTIFACT ===",
+                artifact_json,
+            ]
+        )
+        return "\n".join(sections)
+
+    def _append_case_context(self, sections: list[str], case: Stage9PlanningCase) -> None:
+        if case.initial_state:
+            sections.extend(["", "=== INITIAL STATE ===", case.initial_state])
+        if case.goal:
+            sections.extend(["", "=== GOAL ===", case.goal])
+        if case.allowed_actions:
+            sections.extend(["", "=== ALLOWED ACTIONS ===", ", ".join(case.allowed_actions)])
+        if case.constraints:
+            sections.extend(["", "=== CONSTRAINTS ===", *case.constraints])
+        if case.world_rules:
+            sections.extend(["", "=== WORLD RULES ===", *case.world_rules])
+        if case.max_steps is not None:
+            sections.extend(["", "=== STEP BUDGET ===", str(case.max_steps)])
+        if case.expected_final_state:
+            sections.extend(["", "=== TARGET END CONDITION ===", case.expected_final_state])
+
+
+class PlanningOutputParser:
+    """Safely parse the structured Stage 9 planning outputs."""
+
+    def parse_planning_artifact(
+        self,
+        raw_output: str,
+    ) -> tuple[PlanningArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Planning output must be a JSON object."
+
+        required_keys = {
+            "initial_state",
+            "goal_state",
+            "ordered_steps",
+            "dependency_notes",
+            "predicted_final_state",
+            "final_answer",
+        }
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Planning output is missing required key(s): " + ", ".join(sorted(missing))
+
+        initial_state = payload.get("initial_state")
+        goal_state = payload.get("goal_state")
+        ordered_steps = payload.get("ordered_steps")
+        dependency_notes = payload.get("dependency_notes")
+        predicted_final_state = payload.get("predicted_final_state")
+        final_answer = payload.get("final_answer")
+
+        string_fields = {
+            "initial_state": initial_state,
+            "goal_state": goal_state,
+            "predicted_final_state": predicted_final_state,
+            "final_answer": final_answer,
+        }
+        for key, value in string_fields.items():
+            if not isinstance(value, str) or not value.strip():
+                return None, f"Planning output field '{key}' must be a non-empty string."
+
+        if not isinstance(ordered_steps, list) or not ordered_steps:
+            return None, "Planning output field 'ordered_steps' must be a non-empty JSON list."
+        if not isinstance(dependency_notes, list) or not dependency_notes:
+            return None, "Planning output field 'dependency_notes' must be a non-empty JSON list."
+
+        normalized_steps: list[str] = []
+        for item in ordered_steps:
+            if not isinstance(item, str) or not item.strip():
+                return None, "Each ordered planning step must be a non-empty string."
+            normalized_steps.append(item.strip())
+
+        normalized_dependency_notes: list[str] = []
+        for item in dependency_notes:
+            if not isinstance(item, str) or not item.strip():
+                return None, "Each dependency note must be a non-empty string."
+            normalized_dependency_notes.append(item.strip())
+
+        if not 4 <= len(normalized_steps) <= 10:
+            return None, "Planning output field 'ordered_steps' must contain between 4 and 10 items."
+        if len(normalized_dependency_notes) > 5:
+            return None, "Planning output field 'dependency_notes' must contain at most 5 items."
+
+        return (
+            PlanningArtifact(
+                initial_state=initial_state.strip(),
+                goal_state=goal_state.strip(),
+                ordered_steps=normalized_steps,
+                dependency_notes=normalized_dependency_notes,
+                predicted_final_state=predicted_final_state.strip(),
+                final_answer=final_answer.strip(),
+            ),
+            None,
+        )
+
+    def parse_verification_output(
+        self,
+        raw_output: str,
+    ) -> tuple[PlanningVerificationArtifact | None, str | None]:
+        try:
+            payload = self._extract_first_json_object(raw_output)
+        except ValueError as exc:
+            return None, str(exc)
+
+        if not isinstance(payload, dict):
+            return None, "Verification output must be a JSON object."
+
+        required_keys = {"verification_note", "verified_final_answer"}
+        missing = [key for key in required_keys if key not in payload]
+        if missing:
+            return None, "Verification output is missing required key(s): " + ", ".join(sorted(missing))
+
+        verification_note = payload.get("verification_note")
+        verified_final_answer = payload.get("verified_final_answer")
+
+        if not isinstance(verification_note, str) or not verification_note.strip():
+            return None, "Verification output field 'verification_note' must be a non-empty string."
+        if not isinstance(verified_final_answer, str) or not verified_final_answer.strip():
+            return None, "Verification output field 'verified_final_answer' must be a non-empty string."
+
+        return (
+            PlanningVerificationArtifact(
+                verification_note=verification_note.strip(),
+                verified_final_answer=verified_final_answer.strip(),
+            ),
+            None,
+        )
+
+    def _extract_first_json_object(self, raw_output: str) -> Any:
+        text = raw_output.strip()
+        if not text:
+            raise ValueError("Model returned an empty structured output.")
+
+        decoder = json.JSONDecoder()
+        for index, char in enumerate(text):
+            if char != "{":
+                continue
+            try:
+                payload, _end = decoder.raw_decode(text[index:])
+                return payload
+            except json.JSONDecodeError:
+                continue
+
+        raise ValueError("Could not find a valid JSON object in the model output.")
+
+
+class PlanningDeterministicValidator:
+    """Lightweight deterministic checks for Stage 9 planning artifacts."""
+
+    def validate(self, case: Stage9PlanningCase, artifact: PlanningArtifact) -> str:
+        issues: list[str] = []
+        normalized_steps = [step.strip().casefold() for step in artifact.ordered_steps]
+        max_steps = case.max_steps if case.max_steps is not None else 10
+
+        if len(artifact.ordered_steps) > max_steps:
+            issues.append(f"plan uses {len(artifact.ordered_steps)} steps but the budget is {max_steps}")
+
+        if case.allowed_actions:
+            allowed = [action.casefold() for action in case.allowed_actions]
+            for index, step in enumerate(normalized_steps, start=1):
+                if not any(action in step for action in allowed):
+                    issues.append(f"step {index} does not clearly use an allowed action")
+                    break
+
+        if case.expected_final_state:
+            predicted_norm = self._normalize(artifact.predicted_final_state)
+            expected_norm = self._normalize(case.expected_final_state)
+            if expected_norm not in predicted_norm and predicted_norm not in expected_norm:
+                issues.append("predicted final state does not match the target end condition")
+
+        rules = case.validation_rules or {}
+        required_step_keywords = self._string_list_from_rules(rules, "required_step_keywords")
+        for keyword in required_step_keywords:
+            if not any(keyword.casefold() in step for step in normalized_steps):
+                issues.append(f"missing required step keyword: {keyword}")
+
+        forbidden_step_keywords = self._string_list_from_rules(rules, "forbidden_step_keywords")
+        for keyword in forbidden_step_keywords:
+            if any(keyword.casefold() in step for step in normalized_steps):
+                issues.append(f"contains forbidden step keyword: {keyword}")
+
+        ordered_keywords = self._string_list_from_rules(rules, "ordered_step_keywords")
+        if ordered_keywords:
+            cursor = 0
+            for keyword in ordered_keywords:
+                matched = False
+                while cursor < len(normalized_steps):
+                    if keyword.casefold() in normalized_steps[cursor]:
+                        matched = True
+                        cursor += 1
+                        break
+                    cursor += 1
+                if not matched:
+                    issues.append(f"missing required step order keyword: {keyword}")
+                    break
+
+        if issues:
+            return "Deterministic checks found issues: " + "; ".join(issues)
+        return "Deterministic checks passed basic schema, step-budget, ordering, and end-state checks."
+
+    def _normalize(self, value: str) -> str:
+        return " ".join(value.split()).casefold()
+
+    def _string_list_from_rules(self, rules: Mapping[str, Any], key: str) -> list[str]:
+        value = rules.get(key)
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            return []
+        normalized: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item.strip():
+                normalized.append(item.strip())
+        return normalized
+
+
+@dataclass
+class PlanningCaseResult:
+    """Structured result for one Stage 9 planning case."""
+
+    case_id: str
+    task_family: str
+    scoring_type: str
+    expected_answer: str
+    direct_answer: str
+    planning_raw_output: str
+    parsed_planning_artifact: dict[str, Any] | None
+    verified_final_answer: str
+    direct_pass: bool
+    planning_pass: bool
+    planning_helped: bool
+    regression: bool
+    direct_scoring_error: str | None = None
+    planning_scoring_error: str | None = None
+    parse_error: str | None = None
+    probable_failure_reason: str | None = None
+    verification_raw_output: str | None = None
+    verification_note: str | None = None
+    plan_grounded_answer: str | None = None
+    predicted_final_state: str | None = None
+    plan_length: int = 0
+    deterministic_validation_note: str | None = None
+
+
+class PlanningEvaluator:
+    """Run direct-answer versus structured-and-verified long-horizon planning for Stage 9."""
+
+    def __init__(
+        self,
+        ollama_client: OllamaChatClient,
+        model: str,
+        temperature: float,
+        prompt_builder: PlanningPromptBuilder | None = None,
+        output_parser: PlanningOutputParser | None = None,
+        scoring_engine: ScoringEngine | None = None,
+        deterministic_validator: PlanningDeterministicValidator | None = None,
+    ) -> None:
+        self.ollama_client = ollama_client
+        self.model = model
+        self.temperature = temperature
+        self.prompt_builder = prompt_builder if prompt_builder is not None else PlanningPromptBuilder()
+        self.output_parser = output_parser if output_parser is not None else PlanningOutputParser()
+        self.scoring_engine = scoring_engine if scoring_engine is not None else ScoringEngine()
+        self.deterministic_validator = (
+            deterministic_validator if deterministic_validator is not None else PlanningDeterministicValidator()
+        )
+
+    def evaluate_case(self, case: Stage9PlanningCase) -> PlanningCaseResult:
+        direct_answer = self._run_single_prompt(self.prompt_builder.build_direct_prompt(case))
+        planning_raw_output = self._run_single_prompt(self.prompt_builder.build_planning_prompt(case))
+
+        parsed_artifact, parse_error = self.output_parser.parse_planning_artifact(planning_raw_output)
+        plan_grounded_answer = parsed_artifact.final_answer if parsed_artifact is not None else None
+        predicted_final_state = parsed_artifact.predicted_final_state if parsed_artifact is not None else None
+        plan_length = len(parsed_artifact.ordered_steps) if parsed_artifact is not None else 0
+
+        verification_raw_output: str | None = None
+        verification_note: str | None = None
+        verified_final_answer = ""
+        deterministic_validation_note: str | None = None
+
+        if parsed_artifact is not None:
+            deterministic_validation_note = self.deterministic_validator.validate(case, parsed_artifact)
+            verification_raw_output = self._run_single_prompt(
+                self.prompt_builder.build_verification_prompt(
+                    case=case,
+                    artifact=parsed_artifact,
+                    deterministic_validation_note=deterministic_validation_note,
+                )
+            )
+            parsed_verification, verification_parse_error = self.output_parser.parse_verification_output(
+                verification_raw_output
+            )
+
+            if verification_parse_error:
+                parse_error = self._combine_errors(parse_error, verification_parse_error)
+                verification_note = "Verification output could not be parsed cleanly; using planning artifact final answer."
+                verified_final_answer = parsed_artifact.final_answer
+            else:
+                assert parsed_verification is not None
+                verification_note = parsed_verification.verification_note
+                verified_final_answer = parsed_verification.verified_final_answer
+        else:
+            deterministic_validation_note = None
+            verification_note = None
+            verified_final_answer = ""
+
+        direct_pass, direct_scoring_error = self.scoring_engine.score_answer(
+            answer=direct_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+        planning_pass, planning_scoring_error = self.scoring_engine.score_answer(
+            answer=verified_final_answer,
+            expected_answer=case.expected_answer,
+            scoring_type=case.scoring_type,
+        )
+
+        planning_helped = (not direct_pass) and planning_pass
+        regression = direct_pass and (not planning_pass)
+
+        probable_failure_reason = self._infer_failure_reason(
+            direct_answer=direct_answer,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            planning_pass=planning_pass,
+            direct_scoring_error=direct_scoring_error,
+            planning_scoring_error=planning_scoring_error,
+            parse_error=parse_error,
+            deterministic_validation_note=deterministic_validation_note,
+        )
+
+        return PlanningCaseResult(
+            case_id=case.case_id,
+            task_family=case.task_family,
+            scoring_type=case.scoring_type,
+            expected_answer=case.expected_answer,
+            direct_answer=direct_answer,
+            planning_raw_output=planning_raw_output,
+            parsed_planning_artifact=asdict(parsed_artifact) if parsed_artifact is not None else None,
+            verified_final_answer=verified_final_answer,
+            direct_pass=direct_pass,
+            planning_pass=planning_pass,
+            planning_helped=planning_helped,
+            regression=regression,
+            direct_scoring_error=direct_scoring_error,
+            planning_scoring_error=planning_scoring_error,
+            parse_error=parse_error,
+            probable_failure_reason=probable_failure_reason,
+            verification_raw_output=verification_raw_output,
+            verification_note=verification_note,
+            plan_grounded_answer=plan_grounded_answer,
+            predicted_final_state=predicted_final_state,
+            plan_length=plan_length,
+            deterministic_validation_note=deterministic_validation_note,
+        )
+
+    def evaluate_cases(self, cases: Sequence[Stage9PlanningCase]) -> list[PlanningCaseResult]:
+        return [self.evaluate_case(case) for case in cases]
+
+    def build_scorecard(self, results: Sequence[PlanningCaseResult]) -> dict[str, Any]:
+        total_cases = len(results)
+        direct_pass_count = sum(result.direct_pass for result in results)
+        planning_pass_count = sum(result.planning_pass for result in results)
+        planning_improvement_count = sum(result.planning_helped for result in results)
+        regression_count = sum(result.regression for result in results)
+        parse_error_count = sum(1 for result in results if result.parse_error)
+
+        direct_pass_rate = (direct_pass_count / total_cases) if total_cases else 0.0
+        planning_pass_rate = (planning_pass_count / total_cases) if total_cases else 0.0
+
+        return {
+            "total_cases": total_cases,
+            "direct_pass_count": direct_pass_count,
+            "planning_pass_count": planning_pass_count,
+            "planning_improvement_count": planning_improvement_count,
+            "regression_count": regression_count,
+            "parse_error_count": parse_error_count,
+            "direct_pass_rate": round(direct_pass_rate, 4),
+            "planning_pass_rate": round(planning_pass_rate, 4),
+            "pass_rate": round(planning_pass_rate, 4),
+            "per_case_details": [asdict(result) for result in results],
+        }
+
+    def _run_single_prompt(self, prompt: str) -> str:
+        try:
+            return self.ollama_client.send_chat(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=self.temperature,
+            )
+        except OllamaServiceError as exc:
+            return f"ERROR: {exc}"
+
+    def _combine_errors(self, existing: str | None, new_error: str | None) -> str | None:
+        if not new_error:
+            return existing
+        if not existing:
+            return new_error
+        return f"{existing} ; {new_error}"
+
+    def _infer_failure_reason(
+        self,
+        direct_answer: str,
+        verified_final_answer: str,
+        direct_pass: bool,
+        planning_pass: bool,
+        direct_scoring_error: str | None,
+        planning_scoring_error: str | None,
+        parse_error: str | None,
+        deterministic_validation_note: str | None,
+    ) -> str | None:
+        if direct_pass and planning_pass:
+            return None
+
+        if direct_scoring_error or planning_scoring_error:
+            problems = [item for item in [direct_scoring_error, planning_scoring_error] if item]
+            return " ; ".join(problems)
+
+        if parse_error:
+            return f"Structured planning or verification output was malformed: {parse_error}"
+
+        if deterministic_validation_note and deterministic_validation_note.startswith("Deterministic checks found issues"):
+            return deterministic_validation_note
+
+        if direct_answer.startswith("ERROR:") or verified_final_answer.startswith("ERROR:"):
+            return "A model call failed during evaluation."
+
+        if direct_pass and not planning_pass:
+            return "The planning scaffold or verification pass destabilized a previously correct direct answer."
+
+        if (not direct_pass) and (not planning_pass):
+            direct_norm = self.scoring_engine.normalize_whitespace(direct_answer).casefold()
+            planning_norm = self.scoring_engine.normalize_whitespace(verified_final_answer).casefold()
+            if direct_norm == planning_norm:
+                return "The planning path did not materially improve the final answer."
+            return "The planning path changed the answer, but the verified final answer was still incorrect."
+
+        return None
+
+
+class PlanningFailureLogWriter(FailureLogWriter):
+    """Extend the shared failure-log writer with Stage 9 support."""
+
+    def write_planning_log(self, path: str | Path, results: Sequence[PlanningCaseResult]) -> Path:
+        output_path = Path(path)
+        failed_results = [result for result in results if not result.planning_pass]
+
+        lines: list[str] = [
+            "# Stage 9 Failure Log",
+            "",
+            f"Total failed verified-planning cases: {len(failed_results)}",
+            "",
+        ]
+
+        if not failed_results:
+            lines.extend(
+                [
+                    "All verified-planning cases passed in this run.",
+                    "",
+                    "No failure entries were generated.",
+                ]
+            )
+        else:
+            for result in failed_results:
+                lines.extend(
+                    [
+                        f"## {result.case_id}",
+                        "",
+                        f"- Task family: {result.task_family}",
+                        f"- Expected answer: `{result.expected_answer}`",
+                        f"- Direct answer: `{result.direct_answer}`",
+                        f"- Verified planning final answer: `{result.verified_final_answer}`",
+                        f"- Parse error: {result.parse_error or 'None'}",
+                        f"- Deterministic validation note: {result.deterministic_validation_note or 'None'}",
+                        f"- Probable failure reason: {result.probable_failure_reason or 'Unknown'}",
+                        "",
+                    ]
+                )
+
+        output_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        return output_path
+
+
+class Stage9CLIApp(Stage8CLIApp):
+    """Top-level controller preserving Stages 1-8 and adding Stage 9 modes."""
+
+    def __init__(
+        self,
+        config: AppConfig,
+        ollama_client: OllamaChatClient,
+        transfer_case_loader: TransferCaseLoader | None = None,
+        adaptation_case_loader: AdaptationCaseLoader | None = None,
+        fewshot_case_loader: FewShotCaseLoader | None = None,
+        reasoning_case_loader: ReasoningCaseLoader | None = None,
+        commonsense_case_loader: CommonSenseCaseLoader | None = None,
+        abstract_case_loader: AbstractCaseLoader | None = None,
+        causal_case_loader: CausalCaseLoader | None = None,
+        planning_case_loader: PlanningCaseLoader | None = None,
+        scorecard_writer: ScorecardWriter | None = None,
+        failure_log_writer: FailureLogWriter | None = None,
+    ) -> None:
+        super().__init__(
+            config=config,
+            ollama_client=ollama_client,
+            transfer_case_loader=transfer_case_loader,
+            adaptation_case_loader=adaptation_case_loader,
+            fewshot_case_loader=fewshot_case_loader,
+            reasoning_case_loader=reasoning_case_loader,
+            commonsense_case_loader=commonsense_case_loader,
+            abstract_case_loader=abstract_case_loader,
+            causal_case_loader=causal_case_loader,
+            scorecard_writer=scorecard_writer,
+            failure_log_writer=(failure_log_writer if failure_log_writer is not None else PlanningFailureLogWriter()),
+        )
+        self.planning_case_loader = planning_case_loader if planning_case_loader is not None else PlanningCaseLoader()
+
+    def run(self) -> int:
+        if self.config.mode in {"planning-demo", "planning-eval"}:
+            return self._run_planning_modes()
+        return super().run()
+
+    def _run_planning_modes(self) -> int:
+        try:
+            cases = self.planning_case_loader.load(self.config.cases_path, limit=self.config.limit)
+        except Stage9CaseLoadError as exc:
+            print(f"Error: {exc}")
+            return 1
+
+        if not cases:
+            print("Error: The planning case file loaded successfully but contained no cases.")
+            return 1
+
+        evaluator = PlanningEvaluator(
+            ollama_client=self.ollama_client,
+            model=self.config.model,
+            temperature=self.config.temperature,
+        )
+
+        if self.config.mode == "planning-demo":
+            return self._run_planning_demo(evaluator=evaluator, cases=cases)
+
+        return self._run_planning_eval(evaluator=evaluator, cases=cases)
+
+    def _run_planning_demo(
+        self,
+        evaluator: PlanningEvaluator,
+        cases: Sequence[Stage9PlanningCase],
+    ) -> int:
+        print(f"Loaded planning cases: {len(cases)}")
+
+        for index, case in enumerate(cases, start=1):
+            result = evaluator.evaluate_case(case)
+            print("-" * 72)
+            print(f"Demo case {index}: {case.case_id}")
+            print(f"Task family: {case.task_family}")
+            print(f"Direct answer: {result.direct_answer}")
+            print(f"Plan-grounded answer: {result.plan_grounded_answer or 'PARSE FAILED'}")
+            print(f"Verified final outcome: {result.verified_final_answer or 'N/A'}")
+            print(f"Expected answer: {case.expected_answer}")
+            print(f"Long-horizon planning helped: {'YES' if result.planning_helped else 'NO'}")
+
+        return 0
+
+    def _run_planning_eval(
+        self,
+        evaluator: PlanningEvaluator,
+        cases: Sequence[Stage9PlanningCase],
+    ) -> int:
+        results = evaluator.evaluate_cases(cases)
+        scorecard = evaluator.build_scorecard(results)
+
+        scorecard_path = self.scorecard_writer.write(self.config.scorecard_out, scorecard)
+        if hasattr(self.failure_log_writer, "write_planning_log"):
+            failure_log_path = self.failure_log_writer.write_planning_log(self.config.failure_log_out, results)  # type: ignore[attr-defined]
+        else:
+            failure_log_path = PlanningFailureLogWriter().write_planning_log(self.config.failure_log_out, results)
+
+        print("Long-horizon planning evaluation complete.")
+        print(f"Total cases: {scorecard['total_cases']}")
+        print(f"Direct passes: {scorecard['direct_pass_count']}")
+        print(f"Verified planning passes: {scorecard['planning_pass_count']}")
+        print(f"Planning improvements: {scorecard['planning_improvement_count']}")
+        print(f"Regressions: {scorecard['regression_count']}")
+        print(f"Parse errors: {scorecard['parse_error_count']}")
+        print(f"Direct pass rate: {scorecard['direct_pass_rate']:.2%}")
+        print(f"Verified planning pass rate: {scorecard['planning_pass_rate']:.2%}")
+        print(f"Scorecard written to: {scorecard_path}")
+        print(f"Failure log written to: {failure_log_path}")
+
+        return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     config = ConfigResolver.resolve(argv=argv)
 
@@ -4469,7 +5362,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Error: {error_message}")
         return 1
 
-    app = Stage8CLIApp(config=config, ollama_client=ollama_client)
+    app = Stage9CLIApp(config=config, ollama_client=ollama_client)
     return app.run()
 
 
